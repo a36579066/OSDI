@@ -5,13 +5,13 @@
 #include <string.h>
 
 // 觸發中斷時間
-void time_iqr_trigger(uint32_t second){
-  uint64_t freq;
-  asm volatile ("mrs %0, cntfrq_el0" : "=r" (freq));
-  uint64_t tval = second * freq;
-  asm volatile ("msr cntp_tval_el0, %0" :: "r" (tval));
-  *(unsigned int*)CORE0_TIMER_IRQ_CTRL = 2;
-}
+// void time_iqr_trigger(uint32_t second){
+//   uint64_t freq;
+//   asm volatile ("mrs %0, cntfrq_el0" : "=r" (freq));
+//   uint64_t tval = second * freq;
+//   asm volatile ("msr cntp_tval_el0, %0" :: "r" (tval));
+//   *(unsigned int*)CORE0_TIMER_IRQ_CTRL = 2;
+// }
 
 timer_t *timer_head = NULL;
 //  timer insert 到 linklist
@@ -37,7 +37,8 @@ static void insert_timer(timer_t *new_timer) {
 }
 
 static void schedule_timer(timer_callback callback, void *data, uint64_t seconds) {
-  timer_t *new_timer = (timer_t *)simple_malloc(sizeof(timer_t));
+  // timer_t *new_timer = (timer_t *)simple_malloc(sizeof(timer_t));
+  timer_t *new_timer = (timer_t *)kmalloc(sizeof(timer_t));
   if (!new_timer)
       return;
   new_timer->callback = callback;
@@ -68,7 +69,8 @@ static void print_message(void *data) {
 
 void setTimeout(char *message, uint64_t seconds) {
   size_t len = strlen_(message) + 1;
-  char *msg_copy = (char *)simple_malloc(len);
+  // char *msg_copy = (char *)simple_malloc(len);
+  char *msg_copy = (char *)kmalloc(len);
   if (!msg_copy)
       return;
   strcpy_(msg_copy, message);

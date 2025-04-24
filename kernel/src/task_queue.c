@@ -1,35 +1,60 @@
 #include <task_queue.h>
 #include <exception_.h>
 #include <allocator.h>
+#include <uart.h>
+#include <type.h>
 
 
 static task_t *task_head = 0;
 static task_t *task_tail = 0;
+task_t* task_start_addr = 0;
 
-
+/* =============== tools =============== */
+task_t* set_task(task_callback_t callback, void *data, int priority);
+void clean_task(task_t* task);
+/* ===================================== */
 
 void task_queue_init(void) {
     disable_interrupts();
     task_head = 0;
     task_tail = 0;
+    DEMO = 0;
+    
+    task_start_addr = (task_t *)kmalloc(sizeof(task_t)*MAX_TASKS);
+    for(int i = 0; i < MAX_TASKS; ++i){
+      task_t* task = task_start_addr + i;
+      task->callback = NULL;
+      task->data = NULL;
+      task->priority = -1;
+      task->used = 0;
+      task->next = NULL;
+      task->prev = NULL;
+      task->addr = (void*) task;
+      
+    }
+
+    DEMO = 0;
     enable_interrupts();
 }
 
 
 int task_enqueue(task_callback_t callback, void *data, int priority) {
   disable_interrupts();
-  task_t *new_task = (task_t *)simple_malloc(sizeof(task_t));
+  // task_t* new_task = (task_t *)simple_malloc(sizeof(task_t));
+  task_t* new_task = set_task(callback, data, priority);
+  
+  if(new_task == NULL){
+    uart_puts("Too many interrupt! At most ");uart_putint(MAX_TASKS);uart_puts(" tasks\n");
+    return 0;
+  }
+
+
   if(new_task == 0) {
+      uart_puts("Out of memory");NL;
       enable_interrupts();
       return 0;
   }
-  
-  new_task->callback = callback;
-  new_task->data = data;
-  new_task->priority = priority;
-  new_task->next = 0;
-  new_task->prev = 0;
-  
+
   // 直接加到頭
   if(task_head == 0) {
       task_head = new_task;
@@ -78,8 +103,41 @@ void task_execute(void) {
         task_head = current->next;
         if(task_head == 0)
             task_tail = 0;
+        task_callback_t callback = current->callback;
+        clean_task(current);
         enable_interrupts(); // 隨時可以插入新task
-        current->callback();
+        // current->callback();
+        callback();
+        
         // enable_interrupts();
   }
+}
+
+task_t* set_task(task_callback_t callback, void *data, int priority){
+  for(task_t* task = task_start_addr; task < task_start_addr + MAX_TASKS; task += 1){
+    
+    if(!task->used){
+      task->callback = callback;
+      task->data = data;
+      task->priority = priority;
+      task->used = 1;
+      task->next = 0;
+      task->prev = 0;
+      task->addr = (void*) task;
+      return task;
+    }else{
+      continue;
+    }
+  }
+  return NULL;
+}
+
+void clean_task(task_t* task){
+  task->callback = NULL;
+  task->data = NULL;
+  task->priority = -1;
+  task->used = 0;
+  task->next = NULL;
+  task->prev = NULL;
+  task->addr = (void*) task;
 }

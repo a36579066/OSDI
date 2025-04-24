@@ -3,7 +3,7 @@
 #include "type.h"
 
 
-#define PAGE_SIZE        4096             // 一頁大小（4KB）
+#define PAGE_SIZE        (uint64_t)4096             // 一頁大小（4KB）
 #define MAX_ORDER        19               // 最大階層 (0x3c000000/0x1000 = 0x3c000 = 245760 = 2^17 + 2^16 + 2^15 + 2^14) => 19
 #define BUDDY_START      0x0       // buddy 系統管理的起始實體記憶體位址
 #define BUDDY_END        0x3c000000       // buddy 系統管理的結束實體記憶體位址
@@ -55,10 +55,10 @@ typedef struct buddy_block_list {
   int status;                   // block 狀態：
   struct buddy_block_list *prev;
   struct buddy_block_list *next;
-
   void *addr;                // 實體記憶體位置
   unsigned int size;        // block 大小（bytes）
   int idd;
+  int in_free_list;         // 0:not, 1:yes
 } buddy_block;
 
 

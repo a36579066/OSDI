@@ -6,7 +6,7 @@
 #include <ramdisk.h>
 
 int DEBUG = 0;
-int DEMO =  1;
+int DEMO =  0;
 #define DEBUG_ALL 0
 
 
@@ -48,6 +48,7 @@ buddy_block* lookup_alloc(void* addr);
 // void print_alloc();
 buddy_block* get_block_by_page_idx_and_order(int page_idx, int order);
 int in_chunk_freelist(memory_pool_t* m_pool, void* add);
+int be_used(void* page_addr);
 /* ===================================================================== */
 
 /* ==================== some tools for memory pool ==================== */
@@ -93,8 +94,9 @@ void buddy_init() {
     entry->block->size = (PAGE_SIZE << (MAX_ORDER - 1));
     entry->block->prev = NULL;
     entry->block->next = NULL;
-
+    entry->block->in_free_list = 1;
     buddy->free_list[MAX_ORDER - 1] = entry->block;
+    
 
     uart_puts("Buddy init complete with free list!\n\n");
     
@@ -126,7 +128,7 @@ void buddy_init() {
 
 void *buddy_malloc(unsigned int size, int chunk) {
     if (size == 0 || size > (PAGE_SIZE << (MAX_ORDER - 1))) {
-        uart_puts("Error: Size out of range\n");
+        if(DEMO)uart_puts("Error: Size out of range\n");
         return NULL;
     }
 
@@ -136,6 +138,7 @@ void *buddy_malloc(unsigned int size, int chunk) {
         total_size <<= 1;
         target_order++;
     }
+    
     if(DEBUG||DEMO){
         uart_puts("[malloc] Requested size = ");
         uart_putint(size);
@@ -143,11 +146,16 @@ void *buddy_malloc(unsigned int size, int chunk) {
         uart_putint(target_order);
         uart_puts("\n");
     }
-
+    
     int order = target_order;
-    while (order < MAX_ORDER && buddy->free_list[order] == NULL)
-        order++;
-
+    
+    
+    // uart_put_hex((void*)buddy->free_list[order]);
+    // uart_puts("hi");
+    while (order < MAX_ORDER && buddy->free_list[order] == NULL){
+        order++;  
+    }
+    
     if (order == MAX_ORDER) {
         if(DEMO)uart_puts("No available block\n");
         return NULL;
@@ -397,24 +405,34 @@ void buddy_free(void *addr) {
             }
             break;
         }
-        uart_puts("[free] Merging with buddy idx = ");
-        uart_putint(buddy_idx);
-        uart_puts(" at order ");
-        uart_putint(order);
-        uart_puts(", buddy_blk status: ");
-        uart_puts(block_state_to_str(buddy_blk->status));
-        uart_puts(", buddy_blk addr: ");
-        uart_put_hex(buddy_blk->addr);
+        if(DEMO){
+            uart_puts("[free] Merging with buddy idx = ");
+            uart_putint(buddy_idx);
+            uart_puts(" at order ");
+            uart_putint(order);
+            uart_puts(", buddy_blk status: ");
+            uart_puts(block_state_to_str(buddy_blk->status));
+            uart_puts(", buddy_blk addr: ");
+            uart_put_hex((uintptr_t)buddy_blk->addr);
+            NL;
+        }
         
-        uart_puts("\n");
+        // 自己和buddy都沒有用到就會到這
         buddy_block* parent_blk = get_parent_block(buddy_blk);
-        block = parent_blk;
+        buddy_blk->in_free_list = 0;
+        block->in_free_list = 0;
+        
         parent_blk->status = BLOCK;
+        // parent_blk->in_free_list = 1;
         set_entry_valid(parent_blk, UNUSED);
+        block = parent_blk;
         if (buddy_blk->prev) buddy_blk->prev->next = buddy_blk->next;
         if (buddy_blk->next) buddy_blk->next->prev = buddy_blk->prev;
-        if (buddy->free_list[order] == buddy_blk)
+        if (buddy->free_list[order] == buddy_blk){
             buddy->free_list[order] = buddy_blk->next;
+            
+        }
+            
 
         order++;
     }
@@ -431,18 +449,21 @@ void buddy_free(void *addr) {
         uart_puts("\n");
         print_free_list();
         print_alloc();
+        NL;
     }
-    NL;
 
 }
 
 void* kmalloc(size_t size) {
+    disable_interrupts();
     int index = find_pool_index(size);
     memory_pool_t *pool;
     if (index == -1) {
         if(DEMO)
         uart_puts("[kmalloc] Size too large, use buddy\n");
-        return buddy_malloc(size, 0);  // fallback
+        void* addr =  buddy_malloc(size, 0);
+        enable_interrupts();
+        return addr; // fallback
     }else {
         while(index < NUM_POOLS){
             pool = &mem_pools[index];
@@ -455,13 +476,17 @@ void* kmalloc(size_t size) {
         }
         if(index >= NUM_POOLS){ // chunk 用完了
             uart_puts("[kmalloc] Chunck used up, use buddy.\n");
+            enable_interrupts();
             return buddy_malloc(size, 0);
         }
-        uart_puts("[kmalloc] Using memory pool index: ");
-        uart_putint(index);
-        uart_puts(", chunk size = ");
-        uart_putint(pool_sizes[index]);
-        uart_puts("\n");
+        if(DEMO){
+            uart_puts("[kmalloc] Using memory pool index: ");
+            uart_putint(index);
+            uart_puts(", chunk size = ");
+            uart_putint(pool_sizes[index]);
+            uart_puts("\n");
+        }
+        
     }
 
     int first_allocate_new_chunk = 0;
@@ -470,7 +495,13 @@ void* kmalloc(size_t size) {
         debug++;
         
         void* page_add = allocate_new_chunk_page(pool);
-        if(page_add == NULL) return;
+       
+        
+        if(page_add == NULL){
+            enable_interrupts();
+            return NULL;
+        } 
+            
         first_allocate_new_chunk = 1;
     }
     chunk_t *chunk = pool->free_list;
@@ -490,11 +521,13 @@ void* kmalloc(size_t size) {
         if(DEMO) print_free_list();
     }
     
-    print_pool_state();
+    if(DEMO)print_pool_state();
+    enable_interrupts();
     return (void *)chunk;
 }
 
 void kfree(void *ptr) {
+    disable_interrupts();
     uintptr_t addr = (uintptr_t)ptr;
     uintptr_t page_base = addr & ~(PAGE_SIZE - 1);
     
@@ -509,25 +542,29 @@ void kfree(void *ptr) {
     buddy_block* block = lookup_alloc(ptr);
     if(block->status == BLOCK_RESERVED){
         if(DEMO)uart_puts("[kfree] Reserved memory! command cancel\n");
+        enable_interrupts();
         return;
     }
     if (!block) {
         uart_puts("[kfree] block not found in alloc_table\n");
+        enable_interrupts();
         return;
     }
 
     if (!block || block->status != BLOCK_CHUNK) {
-        if(be_used(page_base)){
-            uart_puts("Memory has not been allocated!\n");
+        if(be_used((void*)page_base)){
+            if(DEMO)uart_puts("Memory has not been allocated!\n");
+            enable_interrupts();
             return;
         }
-        uart_puts("[kfree] → Not a chunk, calling buddy_free\n");
+        if(DEMO)uart_puts("[kfree] → Not a chunk, calling buddy_free\n");
         buddy_free(ptr);
         if(DEMO) print_free_list();
+        enable_interrupts();
         return;
     }
     
-    uart_puts("[kfree] → This is a CHUNK\n");
+    if(DEMO)uart_puts("[kfree] → This is a CHUNK\n");
 
     memory_pool_t* pool;
     chunk_page_t* pg;
@@ -545,10 +582,13 @@ void kfree(void *ptr) {
     }
     if(in_chunk_freelist(pool, ptr)){
         uart_puts("[kfree] The chunk has not been allocated.\n");
+        enable_interrupts();
         return;
     }
-    uart_puts("[kfree] matched chunk size: ");
-    uart_putint(pool->chunk_size); NL;
+    if(DEMO){
+        uart_puts("[kfree] matched chunk size: ");
+        uart_putint(pool->chunk_size); NL;
+    }
 
     chunk_page_t* prev = NULL;
     
@@ -589,7 +629,7 @@ void kfree(void *ptr) {
         buddy_free(pg->page_addr);
         chunk_free = 1;
     }
-    NL;
+    
     if(!chunk_free){ // chunk_free=1 代表有釋放page，所以有輸出過free_list
         if(DEBUG) print_free_list();
     }
@@ -598,6 +638,7 @@ void kfree(void *ptr) {
         print_free_list();
         
     } 
+    enable_interrupts();
     return;
 }
 
@@ -633,16 +674,21 @@ void startup_allocator_init() {
             int i = (1 << (MAX_ORDER - order - 1)) - 1 + local_idx;
             
             int block_size = (1 << order) * PAGE_SIZE;
+            // 1. addr
             buddy->alloc_table[i].addr = (void *)((uintptr_t)(local_idx * block_size));
+
+            // 2. block
             buddy->alloc_table[i].block = block_metadata_cursor;
             buddy->alloc_table[i].block->idx = local_idx * (1 << order);
             buddy->alloc_table[i].block->status = BLOCK;
-            
             buddy->alloc_table[i].block->addr = (void *)((uintptr_t)(local_idx * block_size));
             buddy->alloc_table[i].block->size = block_size;
             buddy->alloc_table[i].block->prev = NULL;
             buddy->alloc_table[i].block->next = NULL;
             buddy->alloc_table[i].block->idd = idd++;
+            buddy->alloc_table[i].block->in_free_list = 0;
+
+            // 3. valid
             buddy->alloc_table[i].valid = UNUSED;
 
             block_metadata_cursor += 1;
@@ -685,7 +731,7 @@ void memory_reserve(void *start, void* end) {
     uart_puts("\n\nreserve start address: ");
     uart_put_hex((uintptr_t)start);NL;
 	uart_puts("reserve end address: ");
-    uart_put_hex((uintptr_t)end);NL;NL;
+    uart_put_hex((uintptr_t)end);NL;
 }
 
 // =================================== tool ===================================
@@ -728,16 +774,19 @@ void push_to_freelist(int order, buddy_block *blk) {
     buddy->free_list[order] = blk;
 
     blk->status = BLOCK;  // 可用的 block，存的是 order
+    blk->in_free_list = 1;
 }
 
 buddy_block *pop_from_freelist(int order) {
     buddy_block *blk = buddy->free_list[order];
+    
     if (!blk) return NULL;
 
     buddy->free_list[order] = blk->next;
     if (blk->next) blk->next->prev = NULL;
 
     blk->next = blk->prev = NULL;
+    blk->in_free_list = 0;
     return blk;
 }
 
@@ -745,8 +794,9 @@ buddy_block *choose_from_freelist(int order, buddy_block* target_blk) {
     buddy_block *blk = buddy->free_list[order];
     if (!blk) return NULL;
 
-    for(buddy_block* b = buddy->free_list[order]; b; b->next){
+    for(buddy_block* b = buddy->free_list[order]; b!=NULL; b = b->next){
         if(b->idd == target_blk->idd){
+            b->in_free_list = 0;
             if(b->prev){
                 b->prev->next = b->next;
                 if(b->next) b->next->prev = b->prev;
@@ -768,7 +818,7 @@ buddy_block *choose_from_freelist(int order, buddy_block* target_blk) {
 buddy_block* lookup_alloc(void* addr) {
     for(int order = 0; order < MAX_ORDER; order++){
         int block_size = (1 << order) * PAGE_SIZE;
-        int local_block_index = (int)addr/block_size;
+        int local_block_index = (int)(uintptr_t)addr/block_size;
         // uart_puts("local: ");
         // uart_putint(local_block_index);
         // NL;
@@ -822,7 +872,7 @@ void print_free_list() {
             uart_puts("]");
             cur = cur->next;
         }
-        uart_puts("\n");
+        NL;
     }
     uart_puts("[end]\n\n");
 }
@@ -838,10 +888,13 @@ int find_pool_index(size_t size) {
 }
 
 void* allocate_new_chunk_page(memory_pool_t *pool) {
+    
     void *page = buddy_malloc(PAGE_SIZE, 1);
-    uart_puts("page: ");
-    uart_put_hex((uintptr_t)page);
-    NL;
+    if(DEMO){
+        uart_puts("page: ");
+        uart_put_hex((uintptr_t)page);
+        NL;
+    }
     if (!page) return NULL;
 
     int chunk_count = PAGE_SIZE / pool->chunk_size;
@@ -850,8 +903,7 @@ void* allocate_new_chunk_page(memory_pool_t *pool) {
         chunk->next = pool->free_list;
         pool->free_list = chunk;
     }
-    uart_put_hex(pool->free_list);
-    NL;
+    
 
     // 新增 page metadata (之前已經有初始化過，設定值就好)
     chunk_page_t* new_pg = pool->pages + pool->num_page;
@@ -863,6 +915,7 @@ void* allocate_new_chunk_page(memory_pool_t *pool) {
     pool->pages = new_pg;
     pool->num_page++;
     // chunk_metadata_cursor += 1;
+    return page;
 }
 
 void print_pool_state() {
@@ -921,14 +974,21 @@ int in_chunk_freelist(memory_pool_t* m_pool, void* add){
     return 0;
 }
 
-
 int be_used(void* page_addr){
-    int idx = (int)page_addr / PAGE_SIZE;
-    for(int i=0;i<MAX_ORDER;++i)
-    for(buddy_block* b = buddy->free_list[i]; b!= NULL; b=b->next){
-        if(b->addr == page_addr){
-            return 1;
-        }
+    uint32_t idx = (uint32_t)(uintptr_t)page_addr / PAGE_SIZE;
+    buddy_block* blk = get_block_by_page_idx_and_order(idx, 0);
+    for(uint32_t i = 0; i < MAX_ORDER; ++i){
+        if(blk->in_free_list)return 1;
+        blk = get_parent_block(blk);
     }
+
     return 0;
+
+    // for(uint32_t i=0;i<MAX_ORDER;++i)
+    // for(buddy_block* b = buddy->free_list[i]; b!= NULL; b=b->next){
+    //     if(b->addr == page_addr){
+    //         return 1;
+    //     }
+    // }
+    // return 0;
 }

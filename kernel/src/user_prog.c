@@ -60,7 +60,8 @@ void* load_user_program(const char* filename) {
         uart_puts("Error: File not found in initramfs.\n");
         return 0;
     }
-    char* user_program_addr = simple_malloc(64);
+    // char* user_program_addr = simple_malloc(64);
+    char* user_program_addr = kmalloc(64);
     
     // 分配記憶體來放 user program
     void* user_space = (void*) user_program_addr;
@@ -80,7 +81,8 @@ void execute_user_program(char *filename) {
       uart_puts("Error: Failed to load program.\n");
       return;
   }
-  void* ptr = simple_malloc(4096);
+  // void* ptr = simple_malloc(4096);
+  void* ptr = kmalloc(4096);
   uart_puts("SP_EL0 = ");
   uart_put_hex((uintptr_t)ptr);
   uart_puts("\n");

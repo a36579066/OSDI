@@ -13,7 +13,7 @@ typedef struct timer {
 } timer_t;
 
 extern timer_t *timer_head;  // head of the timer list
-void time_iqr_trigger(uint32_t second);
+// void time_iqr_trigger(uint32_t second);
 void setTimeout(char *message,uint64_t seconds);
 
 #endif

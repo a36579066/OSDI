@@ -8,6 +8,7 @@
 #include <task_queue.h>
 #include <utils.h>
 #include <user_prog.h>
+#include <allocator.h>
 
 
 extern int ready_run_user; // define in user_prog.h. Set 1 when it ready to go to user space
@@ -43,18 +44,18 @@ void exception_entry() {
       : "=r"(spsr), "=r"(elr), "=r"(esr), "=r"(cur_el)
   );
 
-  // uart_puts("Entering exception handler\n");
-  // uart_puts("Current EL: \t");
-  // uart_b2x_64(cur_el >> 2);   // EL 在 bits[3:2]
-  // uart_puts("\nSPSR_EL1: \t");
-  // uart_b2x_64(spsr);
-  // uart_puts("\nELR_EL1: \t");
-  // uart_b2x_64(elr);
-  // uart_puts("\nESR_EL1: \t");
-  // uart_b2x_64(esr);
-  // uart_puts("\n");
+  uart_puts("Entering exception handler\n");
+  uart_puts("Current EL: \t");
+  uart_b2x_64(cur_el >> 2);   // EL 在 bits[3:2]
+  uart_puts("\nSPSR_EL1: \t");
+  uart_b2x_64(spsr);
+  uart_puts("\nELR_EL1: \t");
+  uart_b2x_64(elr);
+  uart_puts("\nESR_EL1: \t");
+  uart_b2x_64(esr);
+  uart_puts("\n");
 
-  // uart_puts("Leaving exception handler\n");
+  uart_puts("Leaving exception handler\n");
 }
 
 void uart_enable_interrupt() {
@@ -107,16 +108,7 @@ void irq_handler_function() {
         // asm volatile ("msr cntp_tval_el0, %0" :: "r" (2*freq));
         // *(unsigned int*)CORE0_TIMER_IRQ_CTRL = 2; // clear
       }
-      
-
-      // else {
-      //     uart_puts("test0\n\n");
-      //     // 忽略 timer 中斷（還是清掉，不然會一直觸發）
-      //     // asm volatile ("msr cntp_tval_el0, %0" :: "r" (tval));
-      //     *(unsigned int*)CORE0_TIMER_IRQ_CTRL = 0;
-      //     task_enqueue(core_timer_handler_function, NULL, 1);
-          
-      // }
+    
   }
 
   if (irq_pending1 & (1<<29)) {
@@ -155,9 +147,20 @@ void uart_rx_handler()
     disable_interrupts();
     
     char c = *(volatile unsigned int*)AUX_MU_IO_REG & 0xFF;
-    // mmio_read(AUX_MU_IO_REG) & 0xFF;
-
+    
+    if (!((c >= 'A' && c <= 'Z') ||
+      (c >= 'a' && c <= 'z') ||
+      (c >= '0' && c <= '9') ||
+      (c == ' ') || (c == '\b') || (c == '\r') || (c == '\n') || (c == 0x7F) ||
+      (c == '\t') || (c >= 0x21 && c <= 0x7E)))  // 👈 這裡補上括號！
+    {
+        
+        enable_interrupts();
+        return;
+    }
+    
     // 收進 RX buffer
+    if(c != 0x7F) // 如果不是 backspace
     uart_rx_buffer[uart_rx_tail++] = c;
 
     if (c == '\r' || c == '\n') {
@@ -171,6 +174,9 @@ void uart_rx_handler()
         delay(150);
         async_shell();
     } else {
+        // if(c == 0x7F){
+        //   uart_puts("back space");NL;
+        // }
         uart_tx_buffer[uart_tx_tail++] = c;
         *(volatile unsigned int*)AUX_MU_IER_REG |= 0x2;
         *(volatile unsigned int*)AUX_MU_IER_REG |= 0x1;
@@ -266,11 +272,11 @@ void timer_irq_handler_function() {
     if(timer_head) {
       asm volatile("msr cntp_cval_el0, %0"::"r"(timer_head->expiry));
       asm volatile("msr cntp_ctl_el0,%0"::"r"(1));
-    } 
-    // else {
-    //   asm volatile("msr cntp_ctl_el0,%0"::"r"(0));
-    // }
-  
+    }
+    // DEMO = 1;
+    kfree((void*) timer->data);
+    kfree((void*) timer);
+    // DEMO = 0;
 
     //enable interrupt
     enable_interrupts();

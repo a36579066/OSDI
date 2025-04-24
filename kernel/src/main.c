@@ -25,34 +25,26 @@ void main() {
   check_current_el();
   // asm volatile("bl core_timer_enable");
   fdt_traverse(initramfs_callback);
-  enable_interrupts();  
-  uart_enable_interrupt();
+  
   // task_queue_init();
   uart_puts("Welcome to Simple Shell!\n");
   uart_puts("Type 'help' to see available commands.\n ");
-  
   startup_allocator_init();
-  // print_free_list();
+  task_queue_init();
   // print_pool_state();
+  // print_free_list();
+  
+  enable_interrupts();  
+  uart_enable_interrupt();
   
   DEMO = 0;
-  NL;
   uart_puts("# ");
-
-  // uart_puts("\n==========\n");
-  void* s = kmalloc(129);
-  kfree(s);
-  // uart_puts("\n==========\n");
-
-
-  // uart_puts("\n==========\n");
-
-  // Allocate all blocks at order 0, 1, 2 and 3
-
+  
+  /*
   #define NUM_BLOCKS_AT_ORDER_0  2
-  #define NUM_BLOCKS_AT_ORDER_1  3
-  #define NUM_BLOCKS_AT_ORDER_2  3
-  #define NUM_BLOCKS_AT_ORDER_3  4
+  #define NUM_BLOCKS_AT_ORDER_1  4
+  #define NUM_BLOCKS_AT_ORDER_2  4
+  #define NUM_BLOCKS_AT_ORDER_3  5
   static void *ps0[NUM_BLOCKS_AT_ORDER_0];
   static void *ps1[NUM_BLOCKS_AT_ORDER_1];
   static void *ps2[NUM_BLOCKS_AT_ORDER_2];
@@ -75,40 +67,34 @@ void main() {
   }
   print_free_list();
 
-  uart_puts("\n-----------\n");
+#define  MAX_BLOCK_SIZE  (uint64_t)(PAGE_SIZE * (uint64_t)(1 << MAX_ORDER))
 
-#define  MAX_BLOCK_SIZE  (PAGE_SIZE * (1 << MAX_ORDER))
-
-/* **DO NOT** uncomment this section */
 
 void* c1, *c2, *c3, *c4, *c5, *c6, *c7, *c8;
-void *p1, *p2, *p3, *p4, *p5, *p6, *p7, *p8;
+void *p1, *p2, *p3, *p4, *p5, *p6, *p7;
 // DEMO = 1;
 p1 = kmalloc(4095);
 kfree(p1);                        // 4095
 p1 = kmalloc(4095);
-print_free_list();
-print_pool_state();
+// print_free_list();
+// print_pool_state();
 c1 = kmalloc(1000);
 c2 = kmalloc(1023);
 c3 = kmalloc(999);
 c4 = kmalloc(1010);
 kfree(c3);                        // 999
-print_free_list();
-print_pool_state();
+// print_free_list();
+// print_pool_state();
 c5 = kmalloc(989);
 
 c3 = kmalloc(88);
 c6 = kmalloc(1001);
 kfree(c3);                        // 88
-print_free_list();
-print_pool_state();
+
 uart_puts("line:\n");
 c7 = kmalloc(2045);
 c8 = kmalloc(1);
 
-print_free_list();
-print_pool_state();
 
 p2 = kmalloc(4096);
 kfree(c8);                        // 1
@@ -116,16 +102,12 @@ p3 = kmalloc(16000);
 kfree(p1);                        // 4095
 kfree(c3);                        // 88
 kfree(c7);                        // 2045
-print_free_list();
-print_pool_state();
 uart_puts("next");NL;
 
 p4 = kmalloc(4097);
 p5 = kmalloc(MAX_BLOCK_SIZE + 1);
 p6 = kmalloc(MAX_BLOCK_SIZE);
-print_free_list();
-print_pool_state();
-DEMO = 1;
+
 kfree(p2);                        // 4096
 kfree(p5);                        // MAX_BLOCK_SIZE + 1
 kfree(p4);                        // 4097
@@ -157,57 +139,8 @@ for (int i = 0; i < NUM_BLOCKS_AT_ORDER_2; ++i) {
 for (int i = 0; i < NUM_BLOCKS_AT_ORDER_3; ++i) {
     kfree(ps3[i]);
 }
-uart_puts("\n==========\n");
+*/
 
-  // memory_reserve(0x00004000, 0x00005FFF);
-  // buddy_init();
-  // test(4);
-  // test(5);
-  // test(3);
-  // kmalloc(0x00001000);
-  // kmalloc(0x00001000);
-  // void* add1 = kmalloc(0x00001000);
-  // kfree(add1);
-  // void* add2 = kmalloc(0x00001000);
-  // void* add3 = kmalloc(0x00002000);
-  // void* add4 = kmalloc(0x00001000);
-  // kfree(add4);
-  // kfree(add2);
-  // kfree(add3);
-  // kfree(add1);
-  // void * add1 = kmalloc(0x00001000);
-  // void* small_add1 = kmalloc(0x00000070);
-  // void* small_add2 = kmalloc(0x00000070);
-  // for(int i=0;i<64;i++){
-  //   kmalloc(0x00000070);
-  // }
-  // kmalloc(0x00000070);
-  // kmalloc(0x00000070);
-  // kfree(0);
-  // kfree(small_add1);
-  // kfree(add1);
-  // test(4);
-
-  // void* add1 = kmalloc(0x00001000);
-  // void* add2 = kmalloc(0x00000001); //0x00001FF0
-  
-  // void* add3 = kmalloc(0x00000001);
-  // kfree(add3);
-  // kfree(add2);
-  // void* ad = kmalloc(0x00000020);
-  // kfree(add1);
-  // kfree(ad);
-  // void* add1 = kmalloc(0x00000F00);
-  // void* add2 = kmalloc(0x00000F00);
-  // void* small_add3 = kmalloc(0x00004000);
-  // kfree(add2);
-  // kfree(add1);
-  // void* add3 = kmalloc(0x00000F00);
-  // kfree(small_add3);
-  // kfree(add3);
-
-  // kmalloc(0x00000001);
-  // kmalloc(0x00000001);
-
+// uart_puts("\n==========\n");
   while(1) asm volatile("nop");
 }
