@@ -3,7 +3,7 @@
 #include <uart.h>
 #include <mailbox.h>
 #include <framebuffer.h>
-#include <cpio.h>
+#include <cpio_.h>
 #include <shell.h>
 #include <allocator.h>
 #include <device_tree.h>
@@ -39,6 +39,8 @@ void main() {
   
   DEMO = 0;
   uart_puts("# ");
+
+
   
   /*
   #define NUM_BLOCKS_AT_ORDER_0  2

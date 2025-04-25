@@ -40,3 +40,16 @@ void memset_(void *dest, int c, unsigned int count) {
 	}
 	return;
 }
+
+void memzero(uint64_t *dest, uint64_t size) {
+	unsigned char *ptr = (unsigned char *)dest;
+	while (size >= 8) {
+			*(uint64_t *)ptr = 0; // 清零 8 個位元組
+			ptr += 8;
+			size -= 8;
+	}
+	while (size > 0) {
+			*ptr++ = 0; // 清零剩餘的位元組
+			size--;
+	}
+}

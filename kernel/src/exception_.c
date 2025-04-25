@@ -9,6 +9,7 @@
 #include <utils.h>
 #include <user_prog.h>
 #include <allocator.h>
+#include <syscall.h>
 
 
 extern int ready_run_user; // define in user_prog.h. Set 1 when it ready to go to user space
@@ -34,6 +35,62 @@ void enable_interrupts(){
   );
 }
 
+int c_system_call_handler(trap_frame_t *tf) {
+  disable_interrupts();
+
+  uint64_t num = tf->x8;    // syscall number
+  int      ret = -1;
+
+  switch (num) {
+    case 0:
+      ret = getpid(); // getpid
+      break;
+
+    case 1: ret = sys_uart_read((char*)tf->x0, (size_t)tf->x1);  break;
+    case 2: ret = sys_uart_write((const char*)tf->x0, (size_t)tf->x1);  break;
+    case 3: ret = sys_exec((const char *)tf->x0, (char *const *)tf->x1);   break;
+    case 4: ret = fork(tf);        break;
+    // case 5: sys_exit((int)tf->regs[0]);   /* no ret */ break;
+    // case 6: ret = sys_mbox_call(...);     break;
+    // case 7: sys_kill((int)tf->regs[0]);   break;
+
+    default:
+      // uart_puts("Unknown syscall #");
+      // uart_putint(num);
+      // uart_putc('\n');
+      // ret = -1;
+      // unsigned long spsr, elr, esr, cur_el;
+      // asm volatile(
+      //     "mrs %0, spsr_el1\n\t"
+      //     "mrs %1, elr_el1\n\t"
+      //     "mrs %2, esr_el1\n\t"
+      //     "mrs %3, CurrentEL\n\t"
+      //     : "=r"(spsr), "=r"(elr), "=r"(esr), "=r"(cur_el)
+      // );
+
+      // uart_puts("Entering exception handler\n");
+      // uart_puts("Current EL: \t");
+      // uart_b2x_64(cur_el >> 2);   // EL 在 bits[3:2]
+      // uart_puts("\nSPSR_EL1: \t");
+      // uart_b2x_64(spsr);
+      // uart_puts("\nELR_EL1: \t");
+      // uart_b2x_64(elr);
+      // uart_puts("\nESR_EL1: \t");
+      // uart_b2x_64(esr);
+      // uart_puts("\n");
+
+      // uart_puts("Leaving exception handler\n");
+      break;
+
+    
+  }
+
+  enable_interrupts();
+  return ret;  // 放到 x0，会被汇编存回 trap frame
+}
+
+
+
 void exception_entry() {
   unsigned long spsr, elr, esr, cur_el;
   asm volatile(
@@ -44,18 +101,18 @@ void exception_entry() {
       : "=r"(spsr), "=r"(elr), "=r"(esr), "=r"(cur_el)
   );
 
-  uart_puts("Entering exception handler\n");
-  uart_puts("Current EL: \t");
-  uart_b2x_64(cur_el >> 2);   // EL 在 bits[3:2]
-  uart_puts("\nSPSR_EL1: \t");
-  uart_b2x_64(spsr);
-  uart_puts("\nELR_EL1: \t");
-  uart_b2x_64(elr);
-  uart_puts("\nESR_EL1: \t");
-  uart_b2x_64(esr);
-  uart_puts("\n");
+  // uart_puts("Entering exception handler\n");
+  // uart_puts("Current EL: \t");
+  // uart_b2x_64(cur_el >> 2);   // EL 在 bits[3:2]
+  // uart_puts("\nSPSR_EL1: \t");
+  // uart_b2x_64(spsr);
+  // uart_puts("\nELR_EL1: \t");
+  // uart_b2x_64(elr);
+  // uart_puts("\nESR_EL1: \t");
+  // uart_b2x_64(esr);
+  // uart_puts("\n");
 
-  uart_puts("Leaving exception handler\n");
+  // uart_puts("Leaving exception handler\n");
 }
 
 void uart_enable_interrupt() {

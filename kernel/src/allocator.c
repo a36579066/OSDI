@@ -372,6 +372,10 @@ void buddy_free(void *addr) {
         return;
     }
     int order = __builtin_ctz(block->size / PAGE_SIZE); // log
+    if(block->addr != addr){
+        uart_puts("Undefined behavior!");NL;
+        return;
+    }
     if(block->status != BLOCK_RESERVED) set_entry_valid(block, UNUSED);
     // buddy->alloc_table[block->idd].valid = UNUSED;
 
@@ -521,7 +525,10 @@ void* kmalloc(size_t size) {
         if(DEMO) print_free_list();
     }
     
-    if(DEMO)print_pool_state();
+    if(DEMO){
+        print_pool_state();
+        
+    }
     enable_interrupts();
     return (void *)chunk;
 }
@@ -571,13 +578,27 @@ void kfree(void *ptr) {
     int found = 0;
     for(int i = 0; i < NUM_POOLS; i++){
         pool = &mem_pools[i];
-        for(int j = 0; j < MAX_PAGE_NUM_FOR_CHUNK; j++){
-            pg = pool->pages + j;
-            if((uintptr_t)pg->page_addr == page_base){
+        for(chunk_page_t* tmp_pg = pool->pages; tmp_pg!=NULL; tmp_pg = tmp_pg->next){
+            if((uintptr_t)tmp_pg->page_addr == page_base){
+                pg = tmp_pg;
                 found = 1;
                 break;
             }
         }
+        
+        // for(int j = 0; j < MAX_PAGE_NUM_FOR_CHUNK; j++){
+        //     pg = pool->pages + j;
+        //     if(pool->chunk_size == 2048){
+        //         uart_puts("free_pg_start: ");
+        //         uart_put_hex(pg);NL;
+        //         uart_put_hex(pg->page_addr);NL;
+        //     }
+            
+        //     if((uintptr_t)pg->page_addr == page_base){
+        //         found = 1;
+        //         break;
+        //     }
+        // }
         if(found) break;
     }
     if(in_chunk_freelist(pool, ptr)){
@@ -588,6 +609,7 @@ void kfree(void *ptr) {
     if(DEMO){
         uart_puts("[kfree] matched chunk size: ");
         uart_putint(pool->chunk_size); NL;
+        uart_putint(found);NL;
     }
 
     chunk_page_t* prev = NULL;
@@ -622,7 +644,24 @@ void kfree(void *ptr) {
         if(DEBUG||DEMO)
         uart_puts("[kfree] All chunks freed, releasing page\n");
         pool->num_page--;
-        pool->free_list = NULL;
+
+
+        void* start = pg->page_addr;
+        void* end = (void *)((char *)pg->page_addr + PAGE_SIZE);
+
+        chunk_t* new_list = NULL;
+        chunk_t* cur = pool->free_list;
+        while (cur) {
+            chunk_t* next = cur->next;
+            if ((void *)cur < start || (void *)cur >= end) {
+                cur->next = new_list;
+                new_list = cur;
+            }
+            cur = next;
+        }
+        pool->free_list = new_list;
+
+
         if (prev) prev->next = pg->next;
         else pool->pages = pg->next;
         
@@ -634,7 +673,7 @@ void kfree(void *ptr) {
         if(DEBUG) print_free_list();
     }
     if(DEMO){
-        // print_pool_state();
+        print_pool_state();
         print_free_list();
         
     } 
@@ -700,7 +739,10 @@ void startup_allocator_init() {
     // 處理 pool init
     chunk_metadata_cursor = (chunk_page_t*)(uintptr_t)current;
     align(&chunk_metadata_cursor, 16);
+    
+    
     current = (uintptr_t)(chunk_metadata_cursor + (NUM_POOLS *  MAX_PAGE_NUM_FOR_CHUNK));
+    
     align(&current, 16);
     for (int i = 0; i < NUM_POOLS; i++) {
         mem_pools[i].chunk_size = pool_sizes[i];
@@ -906,7 +948,11 @@ void* allocate_new_chunk_page(memory_pool_t *pool) {
     
 
     // 新增 page metadata (之前已經有初始化過，設定值就好)
-    chunk_page_t* new_pg = pool->pages + pool->num_page;
+    chunk_page_t* new_pg = pool->pages + (int)pool->num_page;
+    // uart_puts("metadata_addr ");
+    // uart_put_hex(new_pg);NL;
+    // uart_puts("pool->page_addr ");
+    // uart_put_hex(pool->pages);NL;
     
     new_pg->page_addr = page;
     new_pg->total_chunks = chunk_count;

@@ -135,7 +135,7 @@ char uart_recv() {
   }
 
   // Echo the received character
-  uart_send(c);
+//   uart_send(c);
   return c;
 }
 

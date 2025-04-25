@@ -9,5 +9,5 @@ uintptr_t align_down(uintptr_t x, unsigned int s);
 int align_mem_offset(void* i, unsigned int align);
 void *memcpy_(void *dest, const void *src, uintptr_t n);
 void memset_(void *dest, int c, unsigned int count);
-
+void memzero(uint64_t *dest, uint64_t size) ;
 #endif

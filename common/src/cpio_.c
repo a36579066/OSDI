@@ -1,9 +1,9 @@
-#include "cpio.h"
+#include "cpio_.h"
 #include "uart.h"
 #include "string.h"
 #include "utils.h"
 #include "ramdisk.h"
-
+#include "type.h"
 
 static const char* strip_dot_slash(const char* filename) {
     if (strncmp_(filename, "./", 2) == 0) {
@@ -42,6 +42,9 @@ struct cpio_file parse_or_find_file_in_archive(const char* target, int is_find_f
                 file.filename = filename;
                 file.data = filedata;
                 file.size = filesize;
+                // uart_puts("found file: ");
+                // uart_puts(file.filename);NL;
+                // uart_putint(file.size);NL;
                 return file;  // Found the file, return it
             }
         } else {
@@ -80,22 +83,44 @@ void cat_cpio_file(const char* target) {
         uart_puts("\n");
         return;
     }
-    
-    for (int i = 0; i < file.size; i++) {
-        uart_send(file.data[i]);
-    }
 }
 
-// void* load_user_program(const char* filename) {
-//     struct cpio_file file = parse_or_find_file_in_archive(filename, 1);  // 搜尋檔案
-//     if (file.size == 0) {
-//         uart_puts("Error: File not found in initramfs.\n");
-//         return 0;
-//     }
+unsigned long cpio_get_size(const char *filename) {
+    const char *target = strip_dot_slash(filename);
+    char *ptr = (char *)RAMDISK_BASE;
 
-//     void* dest = (void*)USER_PROGRAM_LOAD_ADDR;
-//     memcpy(dest, file.data, file.size);  // 複製程式到記憶體
+    while (1) {
+        struct cpio_newc_header *hdr = (struct cpio_newc_header *)ptr;
+        // magic check
+        if (memcmp_(hdr->c_magic, CPIO_MAGIC, 6) != 0) {
+            break;
+        }
 
-//     uart_puts("User program loaded successfully.\n");
-//     return dest;
-// }
+        // 解析 namesize/filesize（都是 ASCII hex）
+        unsigned long namesz = atoi_(hdr->c_namesize, 8);
+        unsigned long filesz = atoi_(hdr->c_filesize, 8);
+
+        // 文件名紧跟 header 之后
+        char *name = ptr + sizeof(*hdr);
+        const char *nm = strip_dot_slash(name);
+
+        // 如果到尾标就退出
+        if (strcmp_(nm, "TRAILER!!!") == 0) {
+            break;
+        }
+
+        // 匹配成功，返回 size
+        if (strcmp_(nm, target) == 0) {
+            return filesz;
+        }
+
+        // 否则跳到下一个 entry
+        unsigned long offset = sizeof(*hdr) + namesz;
+        align(&offset, 4);  // 4‐byte 对齐
+        align(&filesz, 4);
+        ptr += offset + filesz;
+    }
+
+    // 没找到
+    return 0;
+}

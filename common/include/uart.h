@@ -44,13 +44,5 @@ void uart_putc(unsigned char c);
 void uart_b2x_64(unsigned long long num);
 unsigned char uart_recv_img();
 
-void uart_async_puts(const char *str);
-int uart_async_recv(char *buf, int len);
 
-
-
-
-
-
-void uart_irq_puts(const char *str);
 #endif

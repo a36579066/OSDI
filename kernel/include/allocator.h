@@ -9,12 +9,12 @@
 #define BUDDY_END        0x3c000000       // buddy 系統管理的結束實體記憶體位址
 #define BUDDY_METADATA_ADDR  0x10000000   // metadata 存放處（不要放在可分配區）
 #define MAX_ALLOC (1 << MAX_ORDER) - 1
-#define MAX_PAGE_NUM_FOR_CHUNK 1
+#define MAX_PAGE_NUM_FOR_CHUNK 3
 #define NUM_POOLS        6
 
 
 #define NUM_POOLS 6
-static const size_t pool_sizes[NUM_POOLS] = {16, 32, 48, 64, 96, 1024};
+static const size_t pool_sizes[NUM_POOLS] = {16, 32, 48, 96, 128, 2048};
 
 
 #define MAX_RESERVED 32

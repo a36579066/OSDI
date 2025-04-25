@@ -30,9 +30,9 @@ SECTIONS {
         _heap_end = .;
     }
     . = ALIGN(16);
-
+    
     .stack (NOLOAD) : {
-        . = . + 0x4000;  /* 16KB stack */
+        . = . + 0x400000;  /* 4MB stack */
     }
     _stack_top = .;
     _end = .;

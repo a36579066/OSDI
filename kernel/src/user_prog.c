@@ -1,6 +1,6 @@
 #include <user_prog.h>
 #include <allocator.h>
-#include <cpio.h>
+#include <cpio_.h>
 #include <uart.h>
 #include <stdint.h>
 #include <utils.h>
@@ -43,10 +43,10 @@ void switch_to_user_mode(void *func, void* sp_addr) {
 	asm volatile("msr elr_el1,%0" ::"r"(jump_addr));
 	unsigned long sp = (unsigned long) sp_addr;
 	asm volatile("msr sp_el0,%0" :: "r"(sp));
-  asm volatile("mov x0, #0");          // `0b0000` -> M=0（EL0），DAIF=0（允許 IRQ）
-  asm volatile("msr SPSR_EL1, x0");
-  spsr_el1 = 0x0; // M = 0 (EL0), DAIF = 0b0000 (允許 IRQ/FIQ)
-  asm volatile("msr SPSR_EL1, %0" :: "r"(spsr_el1));
+  // asm volatile("mov x0, #0");          // `0b0000` -> M=0（EL0），DAIF=0（允許 IRQ）
+  // asm volatile("msr SPSR_EL1, x0");
+  // spsr_el1 = 0x0; // M = 0 (EL0), DAIF = 0b0000 (允許 IRQ/FIQ)
+  // asm volatile("msr SPSR_EL1, %0" :: "r"(spsr_el1));
   // *(unsigned int*)CORE0_TIMER_IRQ_CTRL = 2;
 	asm volatile("eret");
 
@@ -87,7 +87,7 @@ void execute_user_program(char *filename) {
   uart_put_hex((uintptr_t)ptr);
   uart_puts("\n");
   uart_puts("Switching to user mode...\n");
-  switch_to_user_mode(prog_start, ptr);
+  switch_to_user_mode(prog_start, ptr+4096);
 }
 
 // void cpio_exec_program(char* filename) {

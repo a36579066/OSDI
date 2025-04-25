@@ -27,7 +27,7 @@ primary_core:
     // Set Stack Pointer
     bl from_el2_to_el1
     // msr DAIFSet, #0xf // EL1 禁止 interrupt（防止 EL1 自己處理中斷）
-    ldr x1, =_start      // Load the address of the stack top
+    ldr x1, =_stack_top;      // Load the address of the stack top
     mov sp, x1               // Set the stack pointer
     set_exception_vector_table:
         adr x0, exception_vector_table
@@ -118,6 +118,15 @@ exception_handler:
     load_all
     eret
 
+syscall_handler:
+  save_all
+  mov x0, sp              // get trap frame(which is the same thing we just saved, meaning that we might modified user space registers)
+  bl c_system_call_handler
+  mov x1, sp
+  str x0, [x1, 0]         // save return value to trap frame
+  load_all
+  eret
+
 .global core_timer_enable
 core_timer_enable:
   mov x0, 1
@@ -168,7 +177,7 @@ exception_vector_table:
   b exception_handler
   .align 7
 
-  b exception_handler
+  b syscall_handler
   .align 7
   b irq_handler
   .align 7

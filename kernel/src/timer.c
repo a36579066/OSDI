@@ -65,6 +65,7 @@ static void print_message(void *data) {
   uart_putint(current_time / cntfrq);
   uart_puts(" s)");
   uart_puts("\n");
+  kfree(data);
 }
 
 void setTimeout(char *message, uint64_t seconds) {

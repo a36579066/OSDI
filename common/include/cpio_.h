@@ -1,5 +1,5 @@
-#ifndef CPIO_H
-#define CPIO_H
+#ifndef CPIO__H
+#define CPIO__H
 
 #include <stdint.h>
 // #define RAMDISK_BASE ((void*)(uintptr_t) 0x08000000) // in qemu
@@ -38,5 +38,6 @@ void ls_cpio_archive();
 struct cpio_file parse_or_find_file_in_archive(const char* target, int is_find_file);
 struct cpio_file find_file_in_archive(const char* target);
 void cat_cpio_file(const char* target);
+unsigned long cpio_get_size(const char *filename);
 
 #endif

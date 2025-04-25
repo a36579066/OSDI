@@ -56,4 +56,4 @@ clean:
 
 # Run in QEMU
 run: $(IMG)
-	qemu-system-aarch64 -M raspi3b -kernel $(IMG) -dtb bcm2710-rpi-3-b-plus.dtb -initrd ../initramfs.cpio -serial null -serial stdio -display none
+	qemu-system-aarch64 -M raspi3b -kernel $(IMG) -dtb bcm2710-rpi-3-b-plus.dtb -initrd ../initramfs.cpio -serial null -serial stdio

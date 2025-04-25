@@ -2,12 +2,13 @@
 #include <string.h>
 #include <mailbox.h>
 #include <reboot.h>
-#include <cpio.h>
+#include <cpio_.h>
 #include <allocator.h>
 #include <user_prog.h>
 #include <exception_.h>
 #include <timer.h>
 #include <utils.h>
+#include <thread.h>
 
 #define MAX_CMD_LEN 128 
 extern void core_timer_enable();
@@ -264,12 +265,70 @@ void async_shell() {
         print_pool_state();
         print_free_list();
     }
+    else if(strcmp_(token, "thread") == 0){
+        DEMO = 0;
+        
+        thread_init();
+        
+        // struct cpio_file file = parse_or_find_file_in_archive("test_exec.bin", 1);
+        // char* user_program_addr = kmalloc(file.size+8);
+        // // // 分配記憶體來放 user program
+        // void* user_space = (void*) user_program_addr;
+        // memcpy_(user_space, file.data, file.size);
+        // char* user_space_addr = kmalloc(THREAD_STK_SIZE);
+        // void* user_sp = (void*) user_space_addr + THREAD_STK_SIZE;
+        
+        // uart_puts("add thread ");
+        for(int i=0;i<2;++i)
+            thread_create(foo, 0);
+        // thread_t* t = process_create(user_program_addr, user_sp);
+        // uart_putint(t->pid);NL;
+        
+        // start scheduling
+        // asm volatile("msr tpidr_el1, %0" ::"r" (kmalloc(sizeof(thread_t))));
+        
+        idle_task();
+        
+        // schedule();
+        // schedule();
+        DEMO = 0;
+        
+    }
+    else if(strcmp_(token, "process") == 0){
+        disable_interrupts();
+        uart_rx_tail = 0;
+        uart_tx_tail = 0;
+        uart_tx_head = 0;
+        enable_interrupts();
+        // 1. 建 kernel thread (idle, foo, ...)
+        thread_init();
+
+        // // 2. 建第一個 user process
+        //    entry_point = user_main, user_sp = USER_STACK_TOP
+        
+        // thread_t *u = process_create((uint64_t)user_space, USER_STACK_TOP+10000);
+        thread_t *u = thread_create(init_user_prog, 0);
+        
+        // asm volatile("mov x0, 0  \n");
+        // asm volatile("msr spsr_el1, x0   \n"); 
+        // asm volatile("msr elr_el1,%0" ::"r"(u->context.lr));
+        // asm volatile("msr sp_el0,%0" :: "r"(u->context.sp));
+        // asm volatile("eret");
+        u->status = THREAD_READY;  // process_create 沒 enqueue 的話要補
+
+        // 3. 一進 scheduler 就會選到 user process
+        // schedule();
+        idle_task();
+        
+        // 不會回到這裡
+        while (1) { /* safe‐spin */ }
+    }
     else {
         uart_puts("Unknown command: ");
         uart_puts(token);
         uart_puts("\n");
     }
-   
+    
     // 清空 buffer，準備下一次輸入
     disable_interrupts();
     uart_rx_tail = 0;
