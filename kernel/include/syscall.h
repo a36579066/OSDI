@@ -11,6 +11,8 @@
 extern trap_frame_t *current_tf;
 extern void load_context(void *context);
 #define NR_SIGNALS 64
+#define SIGKILL 9
+#define NR_SIGRETURN 10
 int test_syscall();
 
 // sysnum = 0
@@ -35,6 +37,10 @@ int sys_mbox_call(unsigned char ch, unsigned int *mbox);
 int sys_kill(int pid);
 int sys_signal(int signal, uint64_t handler);
 int sys_signal_kill(int pid, int signal);
+trap_frame_t *sys_sigreturn(trap_frame_t *tf);
+
+/* Last common step before load_all; may replace tf after SIGKILL. */
+trap_frame_t *prepare_user_return(trap_frame_t *tf);
 
 void sigreg(int SIGNAL, void (*handler)());
 void sigkill(int pid, int SIGNAL);

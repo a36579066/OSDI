@@ -11,6 +11,8 @@
 #define THREAD_STK_SIZE 4096
 #define USER_STACK_SIZE 16384
 #define THREAD_SIGNAL_COUNT 64
+#define SIGNAL_STACK_SIZE 4096
+#define THREAD_NO_ACTIVE_SIGNAL (-1)
 
 extern int next_pid;
 
@@ -48,7 +50,17 @@ typedef struct thread {
     thread_status_t status;
     int pid;
     int is_user;
+
+    /* Signal registration and delivery state.  The Lab does not require
+     * nested handlers, so one saved user context and one handler stack are
+     * sufficient for each user thread. */
     uint64_t signal_handlers[THREAD_SIGNAL_COUNT];
+    uint64_t pending_signals;       // Bit n: signal n is waiting to be delivered.
+    int signal_active;              // A user signal handler is currently running.
+    int active_signal;              // Signal number for the active handler, or none.
+    trap_frame_t saved_signal_tf;   // User context to restore on sigreturn().
+    void *signal_stack;             // Temporary EL0 stack used by the handler.
+
     trap_frame_t  *trapframe; // 在 kernel stack 頂，用來儲存 EL0 的寄存器
     void          *pagetable; // for lab6 or 7? 未來 MMU 時會用到，先留 NULL
 } thread_t;

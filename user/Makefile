@@ -3,6 +3,8 @@ AS = aarch64-linux-gnu-as
 LD = aarch64-linux-gnu-ld
 OBJCOPY = aarch64-linux-gnu-objcopy
 
+.PHONY: all cpio signal-test clean
+
 # 預設檔案名稱 (可用 make target=yourfile 來指定)
 target ?= program2
 
@@ -24,9 +26,12 @@ $(BIN): $(ASM_SRC)
 	$(OBJCOPY) -O binary $(ELF) $(BIN)
 
 cpio:
-	cd ../rootfs
-	find . | cpio -o -H newc > ../initramfs.cpio
-	cd ..
+	cd ../rootfs && find . | cpio -o -H newc > ../initramfs.cpio
+
+signal-test:
+	$(MAKE) target=signal_test
+	cp signal_test.bin ../rootfs/signal_test.img
+	$(MAKE) cpio
 
 clean:
 	rm -f $(OBJ) $(ELF) $(BIN)

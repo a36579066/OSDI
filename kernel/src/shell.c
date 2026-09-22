@@ -309,10 +309,13 @@ void async_shell() {
         // 1. 建立 idle thread
         thread_init();
 
-        // // 2. 建第一個 user process
-        //    entry_point = user_main, user_sp = USER_STACK_TOP
-        
-        thread_t *u = start_user_process("syscall.img");
+        /* `process` keeps the Lab 5 default; `process name.img` is useful
+         * for focused user-program tests such as signal_test.img. */
+        char *filename = get_token(&ptr);
+        if (filename == NULL)
+            filename = "syscall.img";
+
+        thread_t *u = start_user_process(filename);
         
         // asm volatile("mov x0, 0  \n");
         // asm volatile("msr spsr_el1, x0   \n"); 
@@ -322,7 +325,9 @@ void async_shell() {
         if (!u) {
             irq_enable();
             uart_enable_interrupt();
-            uart_puts("Unable to start syscall.img\n");
+            uart_puts("Unable to start ");
+            uart_puts(filename);
+            uart_puts("\n");
             return;
         }
 

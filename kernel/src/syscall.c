@@ -16,6 +16,22 @@ int getpid(void) {
   return t ? t->pid : -1;
 }
 
+/* exec starts a fresh user program.  A signal handler belongs to the old
+ * image, so its pending state, temporary stack, and registrations cannot be
+ * carried into the new image. */
+static void reset_signal_state_for_exec(thread_t *thread) {
+  if (thread->signal_stack) {
+    kfree(thread->signal_stack);
+    thread->signal_stack = NULL;
+  }
+
+  thread->pending_signals = 0;
+  thread->signal_active = 0;
+  thread->active_signal = THREAD_NO_ACTIVE_SIGNAL;
+  memset_(&thread->saved_signal_tf, 0, sizeof(thread->saved_signal_tf));
+  memset_(thread->signal_handlers, 0, sizeof(thread->signal_handlers));
+}
+
 size_t sys_uart_write(const char *buf, size_t size) {
   if (!buf)
     return 0;
@@ -27,12 +43,12 @@ size_t sys_uart_write(const char *buf, size_t size) {
 size_t sys_uart_read(char *buf, size_t size) {
   if (!buf || size == 0)
     return 0;
-
+  
   size_t i = 0;
-    while (i < size) {
-        // The user shell uses polling syscalls.  Briefly allow timer IRQs while
-        // waiting so another user thread can run when this one is idle in read.
-        while (!(*(volatile unsigned int *)AUX_MU_LSR_REG & 0x01U)) {
+  while (i < size) {
+    // The user shell uses polling syscalls.  Briefly allow timer IRQs while
+    // waiting so another user thread can run when this one is idle in read.
+    while (!(*(volatile unsigned int *)AUX_MU_LSR_REG & 0x01U)) {
       /* This is an intentional temporary enable, not a critical-section
        * release.  Keep the handler protected before and after the poll. */
       irq_enable();
@@ -72,10 +88,13 @@ int sys_exec(trap_frame_t *tf, const char *name, char *const argv[]) {
   // Do not free the old image: a forked sibling may still be executing it.
   // The small leak is safer than invalidating another process's text in this
   // MMU-less lab.
+  reset_signal_state_for_exec(current);
   current->data = program;
   current->data_size = file.size;
   current->trapframe = tf;
   tf->elr_el1 = (uint64_t)(uintptr_t)program;
+  tf->sp_el0 = ((uintptr_t)current->user_stack + current->user_stack_size) &
+               ~(uintptr_t)0xF;
   return 0;
 }
 
@@ -167,6 +186,8 @@ int sys_mbox_call(unsigned char ch, unsigned int *mbox) {
   return mailbox_call(ch, (volatile unsigned int *)mbox, words);
 }
 
+/* The caller holds lock(), because run_queue may be changed by scheduling or
+ * zombie collection. */
 static thread_t *find_thread_by_pid(int pid) {
   if (!run_queue)
     return NULL;
@@ -180,31 +201,158 @@ static thread_t *find_thread_by_pid(int pid) {
 }
 
 int sys_kill(int pid) {
+  lock();
   thread_t *target = find_thread_by_pid(pid);
-  if (!target || target == cur_thread)
+  if (!target || target == cur_thread) {
+    unlock();
     return -1;
+  }
   target->status = THREAD_ZOMBIE;
+  unlock();
   return 0;
 }
 
 int sys_signal(int signal, uint64_t handler) {
   thread_t *current = (thread_t *)get_current();
-  if (!current || signal < 0 || signal >= THREAD_SIGNAL_COUNT)
+  if (!current || signal < 0 || signal >= THREAD_SIGNAL_COUNT ||
+      signal == SIGKILL)
     return -1;
+
+  lock();
   current->signal_handlers[signal] = handler;
+  unlock();
   return 0;
 }
 
 int sys_signal_kill(int pid, int signal) {
-  thread_t *target = find_thread_by_pid(pid);
-  if (!target || target == cur_thread || signal < 0 ||
-      signal >= THREAD_SIGNAL_COUNT)
+  if (signal < 0 || signal >= THREAD_SIGNAL_COUNT)
     return -1;
 
-  // SIGKILL is the only asynchronous signal needed by the basic Lab 5
-  // program.  Other signals are accepted but deferred until a full signal
-  // frame implementation is added.
-  if (signal == 9)
-    target->status = THREAD_ZOMBIE;
+  /* Sending is deliberately small: record the event and let the target
+   * process consume it at its next EL0 return boundary. */
+  lock();
+  thread_t *target = find_thread_by_pid(pid);
+  if (!target || target->status == THREAD_ZOMBIE) {
+    unlock();
+    return -1;
+  }
+
+  target->pending_signals |= (1ULL << signal);
+  unlock();
   return 0;
+}
+
+static int first_pending_signal(uint64_t pending_signals) {
+  for (int signal = 0; signal < THREAD_SIGNAL_COUNT; signal++) {
+    if (pending_signals & (1ULL << signal))
+      return signal;
+  }
+  return THREAD_NO_ACTIVE_SIGNAL;
+}
+
+/* AArch64: mov x8, #NR_SIGRETURN; svc #0.  The trampoline lives at the
+ * bottom of the separate handler stack, while the handler stack grows down
+ * from its top. */
+static void write_sigreturn_trampoline(uintptr_t address) {
+  uint32_t *code = (uint32_t *)address;
+  code[0] = 0xD2800000U | ((uint32_t)NR_SIGRETURN << 5) | 8U;
+  code[1] = 0xD4000001U;
+
+  /* The kernel has just written executable EL0 memory.  Make the two words
+   * visible to the instruction cache before eret enters the handler. */
+  asm volatile("dc cvau, %0" :: "r"(address) : "memory");
+  asm volatile("dc cvau, %0" :: "r"(address + sizeof(uint32_t)) : "memory");
+  asm volatile("dsb ish" ::: "memory");
+  asm volatile("ic ivau, %0" :: "r"(address) : "memory");
+  asm volatile("ic ivau, %0" :: "r"(address + sizeof(uint32_t)) : "memory");
+  asm volatile("dsb ish\n\tisb" ::: "memory");
+}
+
+/* Replace the return frame with a normal EL0 function-call context. */
+static int enter_user_signal_handler(thread_t *thread, trap_frame_t *tf,
+                                     int signal) {
+  uint64_t handler = thread->signal_handlers[signal];
+  if (handler == 0)
+    return 0;
+
+  void *handler_stack = kmalloc(SIGNAL_STACK_SIZE);
+  if (!handler_stack)
+    return -1;
+
+  uintptr_t stack_base = (uintptr_t)handler_stack;
+  uintptr_t stack_top = (stack_base + SIGNAL_STACK_SIZE) & ~(uintptr_t)0xF;
+  write_sigreturn_trampoline(stack_base);
+
+  /* Keep the interrupted EL0 register set in kernel-owned memory. */
+  memcpy_(&thread->saved_signal_tf, tf, sizeof(*tf));
+  thread->signal_stack = handler_stack;
+  thread->signal_active = 1;
+  thread->active_signal = signal;
+
+  /* eret now enters handler() in EL0.  A normal `ret` in handler jumps to
+   * the trampoline, which issues NR_SIGRETURN. */
+  tf->elr_el1 = handler;
+  tf->sp_el0 = stack_top;
+  tf->lr = stack_base;
+  tf->x0 = (uint64_t)signal;
+  return 1;
+}
+
+trap_frame_t *sys_sigreturn(trap_frame_t *tf) {
+  thread_t *thread = (thread_t *)get_current();
+  if (!tf || !thread || !thread->is_user || !thread->signal_active) {
+    if (tf)
+      tf->x0 = (uint64_t)-1;
+    return tf;
+  }
+
+  void *handler_stack = thread->signal_stack;
+  memcpy_(tf, &thread->saved_signal_tf, sizeof(*tf));
+  thread->signal_stack = NULL;
+  thread->signal_active = 0;
+  thread->active_signal = THREAD_NO_ACTIVE_SIGNAL;
+  thread->trapframe = tf;
+
+  if (handler_stack)
+    kfree(handler_stack);
+  return tf;
+}
+
+/*
+ * This runs only after the syscall/IRQ path has selected the trap frame that
+ * will actually be restored by eret.  It is therefore the safe boundary for
+ * asynchronous signal delivery.
+ */
+trap_frame_t *prepare_user_return(trap_frame_t *tf) {
+  if (!tf || !cur_thread || !cur_thread->is_user)
+    return tf;
+
+  cur_thread->trapframe = tf;
+
+  if ((cur_thread->pending_signals & (1ULL << SIGKILL)) == 0)
+    goto deliver_registered_signal;
+
+  cur_thread->pending_signals &= ~(1ULL << SIGKILL);
+  return exit_current_thread(tf, 128 + SIGKILL);
+
+deliver_registered_signal:
+  if (cur_thread->signal_active || cur_thread->pending_signals == 0)
+    return tf;
+
+  int signal = first_pending_signal(cur_thread->pending_signals);
+  if (signal == THREAD_NO_ACTIVE_SIGNAL)
+    return tf;
+
+  uint64_t handler = cur_thread->signal_handlers[signal];
+  if (handler == 0) {
+    /* The assignment requires SIGKILL's default action.  Other default
+     * actions are intentionally "ignore" until they are specified. */
+    cur_thread->pending_signals &= ~(1ULL << signal);
+    return tf;
+  }
+
+  int result = enter_user_signal_handler(cur_thread, tf, signal);
+  if (result > 0)
+    cur_thread->pending_signals &= ~(1ULL << signal);
+  return tf;
 }

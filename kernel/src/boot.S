@@ -130,6 +130,7 @@ syscall_handler:
   save_all
   mov x0, sp              // pass the saved trap frame
   bl c_system_call_handler
+  bl prepare_user_return  // may replace tf when a signal terminates a thread
   mov sp, x0              // the syscall may switch to another user thread
   load_all
   eret
@@ -162,6 +163,7 @@ irq_handler:
   save_all
   mov x0, sp              // pass the saved trap frame
   bl irq_handler_function
+  bl prepare_user_return  // inspect the thread selected by the IRQ scheduler
   mov sp, x0              // the timer may switch to another user thread
   load_all
   eret

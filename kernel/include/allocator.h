@@ -60,47 +60,43 @@ extern char _heap_end;
 // extern char _end;
 
 typedef struct buddy_block_list {
-  // int idd;                    // unique block id
-  int idx;                   // block 的 global index (以 page 為單位)
-  int status;                   // block 狀態：
+  /* The first 4KB-page covered by this node in the buddy tree. */
+  int first_page;
+  int status;
   struct buddy_block_list *prev;
   struct buddy_block_list *next;
-  void *addr;                // 實體記憶體位置
-  unsigned int size;        // block 大小（bytes）
-  int idd;
-  int in_free_list;         // 0:not, 1:yes
+  void *addr;
+  unsigned int size;
+  int node_id;               /* Complete-binary-tree index. */
+  int on_free_list;          /* 1 only while linked in free_lists[order]. */
 } buddy_block;
 
-
+/* One entry exists for every possible node in the complete buddy tree. */
 typedef struct {
-  void* addr;
   buddy_block* block;
-  int valid; 
-} allocation_entry;
-
+  /* A node is directly allocatable only when it is AVAILABLE and linked in
+   * the free list for its order.  Descendants not reached by a split are
+   * intentionally AVAILABLE but not linked. */
+  int availability;
+} buddy_node_entry;
 
 typedef struct buddy_system_struct {
-  // buddy_block *free_list[MAX_ORDER];
-  // allocation_entry alloc_table[MAX_ALLOC];
-  buddy_block **free_list;
-  allocation_entry *alloc_table;
-  // memory_pool_t* mem_pools;
+  buddy_block **free_lists;       /* One linked list head per order. */
+  buddy_node_entry *node_table;   /* Complete buddy-tree metadata. */
 } buddy_system;
 
 typedef enum {
-  BLOCK_ALLOCATED = -1,  // 已被分配（或保留）
-  BLOCK_RESERVED = -2,     // 尚未使用
-  BLOCK_SPLIT = -3,      // 被切成更小的 block，不可再用
-  BLOCK_CHUNK = -4,      // 被切成chunk
-  BLOCK = -5
-  // val >= 0: 表示該 block 是可用的，值就是它的 order
-} buddy_block_state;
+  BUDDY_BLOCK_RESERVED = -2,
+  BUDDY_BLOCK_SPLIT = -3,
+  BUDDY_BLOCK_CHUNK_PAGE = -4,
+  /* A direct buddy block; availability distinguishes free from allocated. */
+  BUDDY_BLOCK_DIRECT = -5,
+} buddy_block_state_t;
 
 typedef enum {
-  UNUSED = -6,     // 已被分配（或保留）
-  USED = -7,     // 尚未使用
-  // val >= 0: 表示該 block 是可用的，值就是它的 order
-} allocation_entry_state;
+  BUDDY_NODE_AVAILABLE = -6,
+  BUDDY_NODE_IN_USE = -7,
+} buddy_node_availability_t;
 
 
 typedef struct {
@@ -110,7 +106,7 @@ typedef struct {
 
 void startup_allocator_init();
 void* reserve_startup_allocations(unsigned int size, buddy_block* target_blk);
-void* test(int idx);
+void* test(int first_page);
 void memory_reserve(void *start, void* end);
 // void *startup_alloc(size_t size);
 // void record_reserved(void *start, size_t size);

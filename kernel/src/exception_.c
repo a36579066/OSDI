@@ -73,6 +73,8 @@ trap_frame_t *c_system_call_handler(trap_frame_t *tf) {
     case 9:
       tf->x0 = (uint64_t)sys_signal_kill((int)tf->x0, (int)tf->x1);
       break;
+    case NR_SIGRETURN:
+      return sys_sigreturn(tf);
     default:
       tf->x0 = (uint64_t)-1;
       break;

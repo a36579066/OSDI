@@ -28,10 +28,8 @@ extern char _start[];
 extern char _end[];
 /* ==================== for buddy system global variables ==================== */
 buddy_system *buddy = 0;
-void *buddy_mem_start = (void*)BUDDY_START;
-int buddy_block_cursor = 0;
-buddy_block* block_metadata_cursor = 0;
-chunk_page_t* chunk_metadata_cursor = 0;
+buddy_block* node_metadata_cursor = 0;
+chunk_page_t* chunk_page_metadata_cursor = 0;
 /* ========================================================== */
 
 /* ==================== for memory pool ==================== */
@@ -39,27 +37,29 @@ memory_pool_t mem_pools[NUM_POOLS];
 /* ========================================================== */
 
 /* ==================== for startup memory setting ==================== */
-static uintptr_t current = BUDDY_METADATA_ADDR;
+static uintptr_t metadata_cursor = BUDDY_METADATA_ADDR;
 reserved_range_t reserved_ranges[MAX_RESERVED];
 int reserved_count = 0;
 /* ========================================================== */
 /* ==================== some tools for buddy system ==================== */
-char* block_state_to_str(int status);
-char* block_valid_to_str(int valid);
-int find_buddy_index(int index, int order);
-buddy_block* get_parent_block(buddy_block* blk);
-void push_to_freelist(int order, buddy_block *blk);
-buddy_block* pop_from_freelist(int order);
-buddy_block* choose_from_freelist(int order, buddy_block* target_blk);
-void remove_from_freelist(int order, buddy_block *blk);
-void set_entry_valid(buddy_block* blk, int val);
-int get_entry_valid(buddy_block* blk);
+static char* block_state_to_str(int status);
+static char* node_availability_to_str(int availability);
+static int buddy_first_page_for_order(int first_page, int order);
+static int block_count_for_order(int order);
+static uintptr_t block_size_for_order(int order);
+static int node_index_for_order(int order, int local_block_index);
+static buddy_block* parent_block(buddy_block* blk);
+static void push_free_block(int order, buddy_block *blk);
+static buddy_block* pop_free_block(int order);
+static void remove_free_block(int order, buddy_block *blk);
+static void set_node_availability(buddy_block* blk, int availability);
+static int get_node_availability(buddy_block* blk);
 
 
-buddy_block* lookup_alloc(void* addr);
+static buddy_block* lookup_allocated_block(void* addr);
 // void print_free_list();
 // void print_alloc();
-buddy_block* get_block_by_page_idx_and_order(int page_idx, int order);
+static buddy_block* block_for_page_and_order(int page_index, int order);
 int in_chunk_freelist(memory_pool_t* m_pool, void* add);
 int be_used(void* page_addr);
 static int reserve_range(uintptr_t start, uintptr_t end);
@@ -88,10 +88,6 @@ void* simple_malloc(size_t size) {
 }
 
 void buddy_init() {
-    chunk_metadata_cursor = (chunk_page_t*)(uintptr_t)block_metadata_cursor;
-    
-    align(&chunk_metadata_cursor, 16);
-
     // pool init
     for (int i = 0; i < NUM_POOLS; i++) {
         mem_pools[i].chunk_size = pool_sizes[i];
@@ -100,17 +96,16 @@ void buddy_init() {
     
 
     // 建立最上層 block
-    buddy_block_cursor = 1;
-    buddy_block *root = buddy->alloc_table[0].block;
-    root->idx = 0;
-    root->status = BLOCK;
+    buddy_block *root = buddy->node_table[0].block;
+    root->first_page = 0;
+    root->status = BUDDY_BLOCK_DIRECT;
     root->addr = (void *)BUDDY_START;
     root->size = BUDDY_ROOT_SIZE;
     root->prev = NULL;
     root->next = NULL;
-    root->in_free_list = 0;
-    set_entry_valid(root, UNUSED);
-    push_to_freelist(MAX_ORDER - 1, root);
+    root->on_free_list = 0;
+    set_node_availability(root, BUDDY_NODE_AVAILABLE);
+    push_free_block(MAX_ORDER - 1, root);
     
 
     uart_puts("Buddy init complete with free list!\n\n");
@@ -155,9 +150,9 @@ void *buddy_malloc(unsigned int size, int chunk) {
     int order = target_order;
     
     
-    // uart_put_hex((void*)buddy->free_list[order]);
+    // uart_put_hex((void*)buddy->free_lists[order]);
     // uart_puts("hi");
-    while (order < MAX_ORDER && buddy->free_list[order] == NULL){
+    while (order < MAX_ORDER && buddy->free_lists[order] == NULL){
         order++;  
     }
     
@@ -173,50 +168,50 @@ void *buddy_malloc(unsigned int size, int chunk) {
     }
     
     
-    buddy_block *blk = pop_from_freelist(order);
+    buddy_block *blk = pop_free_block(order);
     if (blk == NULL) {
         return NULL;
     }
 
-    set_entry_valid(blk, USED);
+    set_node_availability(blk, BUDDY_NODE_IN_USE);
 
     while (order > target_order) {
         order--;
 
-        buddy_block *left = get_block_by_page_idx_and_order(blk->idx, order);
-        buddy_block *right = get_block_by_page_idx_and_order(
-            blk->idx + (1 << order), order);
+        buddy_block *left = block_for_page_and_order(blk->first_page, order);
+        buddy_block *right = block_for_page_and_order(
+            blk->first_page + (1 << order), order);
         if (left == NULL || right == NULL) {
             return NULL;
         }
 
         /* The old block is now an internal node; allocate its left child. */
-        blk->status = BLOCK_SPLIT;
-        set_entry_valid(blk, USED);
+        blk->status = BUDDY_BLOCK_SPLIT;
+        set_node_availability(blk, BUDDY_NODE_IN_USE);
         blk->prev = NULL;
         blk->next = NULL;
-        blk->in_free_list = 0;
+        blk->on_free_list = 0;
 
-        left->status = BLOCK;
+        left->status = BUDDY_BLOCK_DIRECT;
         left->prev = NULL;
         left->next = NULL;
-        left->in_free_list = 0;
-        set_entry_valid(left, USED);
+        left->on_free_list = 0;
+        set_node_availability(left, BUDDY_NODE_IN_USE);
 
-        right->status = BLOCK;
+        right->status = BUDDY_BLOCK_DIRECT;
         right->prev = NULL;
         right->next = NULL;
-        right->in_free_list = 0;
-        set_entry_valid(right, UNUSED);
-        push_to_freelist(order, right);
+        right->on_free_list = 0;
+        set_node_availability(right, BUDDY_NODE_AVAILABLE);
+        push_free_block(order, right);
         blk = left;
         
         if(DEBUG){
             uart_puts("[malloc] Split block →\n");
             uart_puts("  Left : addr = ");
             uart_put_hex((uintptr_t)blk->addr);
-            uart_puts(", idx = ");
-            uart_putint(blk->idx);
+            uart_puts(", first_page = ");
+            uart_putint(blk->first_page);
             uart_puts(", size = ");
             uart_putint(blk->size);
             uart_puts(", order = ");
@@ -226,8 +221,8 @@ void *buddy_malloc(unsigned int size, int chunk) {
             uart_puts("\n");
             uart_puts("  Right: addr = ");
             uart_put_hex((uintptr_t)right->addr);
-            uart_puts(", idx = ");
-            uart_putint(right->idx);
+            uart_puts(", first_page = ");
+            uart_putint(right->first_page);
             uart_puts(", size = ");
             uart_putint(right->size);
             uart_puts(", order = ");
@@ -237,13 +232,13 @@ void *buddy_malloc(unsigned int size, int chunk) {
 
     }
     if(chunk){
-        blk->status = BLOCK_CHUNK;
+        blk->status = BUDDY_BLOCK_CHUNK_PAGE;
         
     } 
     else {
-        blk->status = BLOCK;
-        set_entry_valid(blk, USED);
-        // buddy->alloc_table[blk->idd].valid = USED;
+        blk->status = BUDDY_BLOCK_DIRECT;
+        set_node_availability(blk, BUDDY_NODE_IN_USE);
+        // buddy->node_table[blk->node_id].availability = BUDDY_NODE_IN_USE;
     }
 
     
@@ -252,8 +247,8 @@ void *buddy_malloc(unsigned int size, int chunk) {
         uart_put_hex((uintptr_t)blk->addr);
         uart_puts(", size = ");
         uart_putint(blk->size);
-        uart_puts(", idx = ");
-        uart_putint(blk->idx);
+        uart_puts(", first_page = ");
+        uart_putint(blk->first_page);
         uart_puts(", order = ");
         uart_putint(__builtin_ctz(blk->size / PAGE_SIZE));
         uart_puts("\n");
@@ -287,7 +282,7 @@ void *reserve_startup_allocations(unsigned int size, buddy_block* target_blk) {
         target_order++;
     }
 
-    int target_page_idx = target_blk->idx;
+    int target_page_idx = target_blk->first_page;
     if (target_page_idx < 0 || target_page_idx >= (int)BUDDY_PAGE_COUNT ||
         (target_page_idx & ((1 << target_order) - 1)) != 0 ||
         target_blk->size != PAGE_SIZE) {
@@ -295,8 +290,8 @@ void *reserve_startup_allocations(unsigned int size, buddy_block* target_blk) {
         return NULL;
     }
 
-    if (get_entry_valid(target_blk) == USED &&
-        target_blk->status != BLOCK_SPLIT) {
+    if (get_node_availability(target_blk) == BUDDY_NODE_IN_USE &&
+        target_blk->status != BUDDY_BLOCK_SPLIT) {
         uart_puts("Error: addr already be used\n");
         return NULL;
     }
@@ -314,11 +309,11 @@ void *reserve_startup_allocations(unsigned int size, buddy_block* target_blk) {
     buddy_block *blk = NULL;
     for (int candidate_order = MAX_ORDER - 1;
          candidate_order >= target_order; --candidate_order) {
-        buddy_block *candidate = get_block_by_page_idx_and_order(
+        buddy_block *candidate = block_for_page_and_order(
             target_page_idx, candidate_order);
-        if (candidate != NULL && candidate->status == BLOCK &&
-            get_entry_valid(candidate) == UNUSED &&
-            candidate->in_free_list) {
+        if (candidate != NULL && candidate->status == BUDDY_BLOCK_DIRECT &&
+            get_node_availability(candidate) == BUDDY_NODE_AVAILABLE &&
+            candidate->on_free_list) {
             order = candidate_order;
             blk = candidate;
             break;
@@ -329,8 +324,8 @@ void *reserve_startup_allocations(unsigned int size, buddy_block* target_blk) {
         uart_puts("No available block for startup reservation\n");
         return NULL;
     }
-    remove_from_freelist(order, blk);
-    if (blk->in_free_list) {
+    remove_free_block(order, blk);
+    if (blk->on_free_list) {
         uart_puts("No available block for startup reservation\n");
         return NULL;
     }
@@ -341,53 +336,53 @@ void *reserve_startup_allocations(unsigned int size, buddy_block* target_blk) {
         uart_puts("\n");
     }
 
-    set_entry_valid(blk, USED);
-    blk->status = (order == target_order) ? BLOCK_RESERVED : BLOCK_SPLIT;
+    set_node_availability(blk, BUDDY_NODE_IN_USE);
+    blk->status = (order == target_order) ? BUDDY_BLOCK_RESERVED : BUDDY_BLOCK_SPLIT;
     blk->prev = NULL;
     blk->next = NULL;
-    blk->in_free_list = 0;
+    blk->on_free_list = 0;
 
     while (order > target_order) {
         order--;
 
-        buddy_block *left = get_block_by_page_idx_and_order(blk->idx, order);
-        buddy_block *right = get_block_by_page_idx_and_order(
-            blk->idx + (1 << order), order);
+        buddy_block *left = block_for_page_and_order(blk->first_page, order);
+        buddy_block *right = block_for_page_and_order(
+            blk->first_page + (1 << order), order);
         if (left == NULL || right == NULL) {
             uart_puts("Error: Could not split startup reservation\n");
             return NULL;
         }
 
-        int target_in_right = target_page_idx >= right->idx;
+        int target_in_right = target_page_idx >= right->first_page;
         buddy_block *chosen = target_in_right ? right : left;
         buddy_block *sibling = target_in_right ? left : right;
 
-        blk->status = BLOCK_SPLIT;
-        set_entry_valid(blk, USED);
+        blk->status = BUDDY_BLOCK_SPLIT;
+        set_node_availability(blk, BUDDY_NODE_IN_USE);
         blk->prev = NULL;
         blk->next = NULL;
-        blk->in_free_list = 0;
+        blk->on_free_list = 0;
 
-        sibling->status = BLOCK;
+        sibling->status = BUDDY_BLOCK_DIRECT;
         sibling->prev = NULL;
         sibling->next = NULL;
-        sibling->in_free_list = 0;
-        set_entry_valid(sibling, UNUSED);
-        push_to_freelist(order, sibling);
+        sibling->on_free_list = 0;
+        set_node_availability(sibling, BUDDY_NODE_AVAILABLE);
+        push_free_block(order, sibling);
 
         chosen->prev = NULL;
         chosen->next = NULL;
-        chosen->in_free_list = 0;
-        set_entry_valid(chosen, USED);
-        chosen->status = (order == target_order) ? BLOCK_RESERVED : BLOCK_SPLIT;
+        chosen->on_free_list = 0;
+        set_node_availability(chosen, BUDDY_NODE_IN_USE);
+        chosen->status = (order == target_order) ? BUDDY_BLOCK_RESERVED : BUDDY_BLOCK_SPLIT;
         blk = chosen;
         
         if(DEBUG){
             uart_puts("[malloc] Split block →\n");
             uart_puts("  main : addr = ");
             uart_put_hex((uintptr_t)blk->addr);
-            uart_puts(", idx = ");
-            uart_putint(blk->idx);
+            uart_puts(", first_page = ");
+            uart_putint(blk->first_page);
             uart_puts(", size = ");
             uart_putint(blk->size);
             uart_puts(", order = ");
@@ -397,8 +392,8 @@ void *reserve_startup_allocations(unsigned int size, buddy_block* target_blk) {
             uart_puts("\n");
             uart_puts("  buddy: addr = ");
             uart_put_hex((uintptr_t)sibling->addr);
-            uart_puts(", idx = ");
-            uart_putint(sibling->idx);
+            uart_puts(", first_page = ");
+            uart_putint(sibling->first_page);
             uart_puts(", size = ");
             uart_putint(sibling->size);
             uart_puts(", order = ");
@@ -408,13 +403,13 @@ void *reserve_startup_allocations(unsigned int size, buddy_block* target_blk) {
 
     }
     
-    blk->status = BLOCK_RESERVED;
-    set_entry_valid(blk, USED);
+    blk->status = BUDDY_BLOCK_RESERVED;
+    set_node_availability(blk, BUDDY_NODE_IN_USE);
     return blk->addr;
 }
 
-void* test(int idx){
-    buddy_block* target_blk = get_block_by_page_idx_and_order(idx, 0);
+void* test(int first_page){
+    buddy_block* target_blk = block_for_page_and_order(first_page, 0);
     void* add = reserve_startup_allocations(PAGE_SIZE, target_blk);
     return add;
 }
@@ -424,7 +419,7 @@ void buddy_free(void *addr) {
         return;
     }
 
-    buddy_block *block = lookup_alloc(addr);
+    buddy_block *block = lookup_allocated_block(addr);
     if (block == NULL) {
         uart_puts("[free] ERROR: Unknown addr, cannot free\n");
         return;
@@ -435,11 +430,11 @@ void buddy_free(void *addr) {
         return;
     }
 
-    if (block->status == BLOCK_RESERVED) {
+    if (block->status == BUDDY_BLOCK_RESERVED) {
         uart_puts("[free] ERROR: Cannot free reserved memory\n");
         return;
     }
-    if (block->status != BLOCK && block->status != BLOCK_CHUNK) {
+    if (block->status != BUDDY_BLOCK_DIRECT && block->status != BUDDY_BLOCK_CHUNK_PAGE) {
         uart_puts("[free] ERROR: Address is not a directly allocated block\n");
         return;
     }
@@ -454,45 +449,47 @@ void buddy_free(void *addr) {
         return;
     }
 
-    set_entry_valid(block, UNUSED);
-    block->status = BLOCK;
+    set_node_availability(block, BUDDY_NODE_AVAILABLE);
+    block->status = BUDDY_BLOCK_DIRECT;
     block->prev = NULL;
     block->next = NULL;
-    block->in_free_list = 0;
+    block->on_free_list = 0;
 
     if(DEBUG){
         uart_puts("[free] Start: addr = ");
         uart_put_hex((uintptr_t)addr);
-        uart_puts(", idx = ");
-        uart_putint(block->idx);
+        uart_puts(", first_page = ");
+        uart_putint(block->first_page);
         uart_puts(", order = ");
         uart_putint(order);
         uart_puts("\n");
     }
 
     while (order < MAX_ORDER - 1) {
-        int buddy_idx = find_buddy_index(block->idx, order);
-        buddy_block *buddy_blk = get_block_by_page_idx_and_order(buddy_idx, order);
+        int buddy_first_page =
+            buddy_first_page_for_order(block->first_page, order);
+        buddy_block *buddy_blk =
+            block_for_page_and_order(buddy_first_page, order);
 
-        if (buddy_blk == NULL || buddy_blk->status != BLOCK ||
-            get_entry_valid(buddy_blk) != UNUSED ||
-            !buddy_blk->in_free_list) {
+        if (buddy_blk == NULL || buddy_blk->status != BUDDY_BLOCK_DIRECT ||
+            get_node_availability(buddy_blk) != BUDDY_NODE_AVAILABLE ||
+            !buddy_blk->on_free_list) {
             if(DEBUG){
-                uart_puts("[free] Cannot merge with buddy idx = ");
-                uart_putint(buddy_idx);
+                uart_puts("[free] Cannot merge with buddy first_page = ");
+                uart_putint(buddy_first_page);
                 uart_puts(" at order ");
                 uart_putint(order);
                 uart_puts(", buddy_blk status: ");
                 uart_puts(buddy_blk ? block_state_to_str(buddy_blk->status) : "NULL");
-                uart_puts(", buddy_blk valid: ");
-                uart_puts(buddy_blk ? block_valid_to_str(get_entry_valid(buddy_blk)) : "NULL");
+                uart_puts(", buddy_blk availability: ");
+                uart_puts(buddy_blk ? node_availability_to_str(get_node_availability(buddy_blk)) : "NULL");
                 uart_puts("\n");
             }
             break;
         }
         if(DEMO){
-            uart_puts("[free] Merging with buddy idx = ");
-            uart_putint(buddy_idx);
+            uart_puts("[free] Merging with buddy first_page = ");
+            uart_putint(buddy_first_page);
             uart_puts(" at order ");
             uart_putint(order);
             uart_puts(", buddy_blk status: ");
@@ -502,23 +499,23 @@ void buddy_free(void *addr) {
             NL;
         }
         
-        buddy_block* parent_blk = get_parent_block(block);
+        buddy_block* parent_blk = parent_block(block);
         if (parent_blk == NULL) {
             break;
         }
 
-        remove_from_freelist(order, buddy_blk);
+        remove_free_block(order, buddy_blk);
 
-        parent_blk->status = BLOCK;
-        set_entry_valid(parent_blk, UNUSED);
+        parent_blk->status = BUDDY_BLOCK_DIRECT;
+        set_node_availability(parent_blk, BUDDY_NODE_AVAILABLE);
         parent_blk->prev = NULL;
         parent_blk->next = NULL;
-        parent_blk->in_free_list = 0;
+        parent_blk->on_free_list = 0;
         block = parent_blk;
         order++;
     }
 
-    push_to_freelist(order, block);
+    push_free_block(order, block);
 
     if(DEBUG){
         uart_puts("[free] Final block: addr = ");
@@ -649,20 +646,20 @@ void kfree(void *ptr) {
         uart_puts("[kfree] page base = ");
         uart_put_hex(page_base); NL;
     }
-    buddy_block* block = lookup_alloc(ptr);
+    buddy_block* block = lookup_allocated_block(ptr);
     if (block == NULL) {
-        uart_puts("[kfree] block not found in alloc_table\n");
+        uart_puts("[kfree] block not found in node_table\n");
         irq_restore(state);
         return;
     }
 
-    if (block->status == BLOCK_RESERVED) {
+    if (block->status == BUDDY_BLOCK_RESERVED) {
         if(DEMO)uart_puts("[kfree] Reserved memory! command cancel\n");
         irq_restore(state);
         return;
     }
 
-    if (block->status != BLOCK_CHUNK) {
+    if (block->status != BUDDY_BLOCK_CHUNK_PAGE) {
         if(DEMO)uart_puts("[kfree] → Not a chunk, calling buddy_free\n");
         buddy_free(ptr);
         if(DEMO) print_free_list();
@@ -790,76 +787,74 @@ void kfree(void *ptr) {
 
 // =================================== startup ===================================
 void startup_allocator_init() {
-    current = (uintptr_t)BUDDY_METADATA_ADDR;
+    metadata_cursor = (uintptr_t)BUDDY_METADATA_ADDR;
     reserved_count = 0;
-    buddy_block_cursor = 0;
 
-    // 1. 配 buddy_system 本體
-    buddy = (buddy_system *)current;
-    current += sizeof(buddy_system);
-    align(&current, 16);
+    /* The metadata arena is carved out once, before the buddy allocator is
+     * usable.  It is reserved below so it can never be returned by kmalloc. */
 
-    // 2. 配 free_list[MAX_ORDER]
-    buddy->free_list = (buddy_block **)current;
-    current += sizeof(buddy_block *) * MAX_ORDER;
-    align(&current, 16);
+    // 1. buddy_system control block
+    buddy = (buddy_system *)metadata_cursor;
+    metadata_cursor += sizeof(buddy_system);
+    align(&metadata_cursor, 16);
 
-    // 3. 配 alloc_table[MAX_ALLOC]
-    buddy->alloc_table = (allocation_entry *)current;
-    current += sizeof(allocation_entry) * MAX_ALLOC;
-    align(&current, 16);
+    // 2. One free-list head for every block order.
+    buddy->free_lists = (buddy_block **)metadata_cursor;
+    metadata_cursor += sizeof(buddy_block *) * MAX_ORDER;
+    align(&metadata_cursor, 16);
+
+    // 3. One node-table entry for every node in the complete buddy tree.
+    buddy->node_table = (buddy_node_entry *)metadata_cursor;
+    metadata_cursor += sizeof(buddy_node_entry) * MAX_ALLOC;
+    align(&metadata_cursor, 16);
     
-    // 4. 初始化欄位為 NULL/UNUSED
+    // 4. No block is allocatable until buddy_init() puts the root on a list.
     for (int i = 0; i < MAX_ORDER; ++i) {
-        buddy->free_list[i] = NULL;
+        buddy->free_lists[i] = NULL;
     }
     
-    block_metadata_cursor = (buddy_block *)current;
-    align(&block_metadata_cursor, 16);
-    int idd = 0;
+    node_metadata_cursor = (buddy_block *)metadata_cursor;
+    align(&node_metadata_cursor, 16);
     for (int order = MAX_ORDER - 1; order >= 0; order--) {
-        for (int local_idx = 0; local_idx < (1 << (MAX_ORDER - order - 1)); ++local_idx) {
-            int i = (1 << (MAX_ORDER - order - 1)) - 1 + local_idx;
+        for (int local_idx = 0;
+             local_idx < block_count_for_order(order);
+             ++local_idx) {
+            int i = node_index_for_order(order, local_idx);
             
-            uintptr_t block_size = PAGE_SIZE << order;
-            // 1. addr
-            buddy->alloc_table[i].addr = (void *)
+            uintptr_t block_size = block_size_for_order(order);
+            // Static identity of this buddy-tree node.
+            buddy->node_table[i].block = node_metadata_cursor;
+            buddy->node_table[i].block->first_page = local_idx * (1 << order);
+            buddy->node_table[i].block->status = BUDDY_BLOCK_DIRECT;
+            buddy->node_table[i].block->addr = (void *)
                 ((uintptr_t)local_idx * block_size);
+            buddy->node_table[i].block->size = block_size;
+            buddy->node_table[i].block->prev = NULL;
+            buddy->node_table[i].block->next = NULL;
+            buddy->node_table[i].block->node_id = i;
+            buddy->node_table[i].block->on_free_list = 0;
 
-            // 2. block
-            buddy->alloc_table[i].block = block_metadata_cursor;
-            buddy->alloc_table[i].block->idx = local_idx * (1 << order);
-            buddy->alloc_table[i].block->status = BLOCK;
-            buddy->alloc_table[i].block->addr = (void *)
-                ((uintptr_t)local_idx * block_size);
-            buddy->alloc_table[i].block->size = block_size;
-            buddy->alloc_table[i].block->prev = NULL;
-            buddy->alloc_table[i].block->next = NULL;
-            buddy->alloc_table[i].block->idd = idd++;
-            buddy->alloc_table[i].block->in_free_list = 0;
+            buddy->node_table[i].availability = BUDDY_NODE_AVAILABLE;
 
-            // 3. valid
-            buddy->alloc_table[i].valid = UNUSED;
-
-            block_metadata_cursor += 1;
-            align(&block_metadata_cursor, 16);
+            node_metadata_cursor += 1;
+            align(&node_metadata_cursor, 16);
         }
     }
-    current = (uintptr_t)block_metadata_cursor;
+    metadata_cursor = (uintptr_t)node_metadata_cursor;
     
     // 處理 pool init
-    chunk_metadata_cursor = (chunk_page_t*)(uintptr_t)current;
-    align(&chunk_metadata_cursor, 16);
+    chunk_page_metadata_cursor = (chunk_page_t*)(uintptr_t)metadata_cursor;
+    align(&chunk_page_metadata_cursor, 16);
     
     
-    current = (uintptr_t)(chunk_metadata_cursor + (NUM_POOLS *  MAX_PAGE_NUM_FOR_CHUNK));
+    metadata_cursor = (uintptr_t)(chunk_page_metadata_cursor + (NUM_POOLS *  MAX_PAGE_NUM_FOR_CHUNK));
     
-    align(&current, 16);
+    align(&metadata_cursor, 16);
     for (int i = 0; i < NUM_POOLS; i++) {
         mem_pools[i].chunk_size = pool_sizes[i];
         mem_pools[i].free_list = NULL;
         mem_pools[i].num_page = 0;
-        chunk_page_t *metadata_base = chunk_metadata_cursor +
+        chunk_page_t *metadata_base = chunk_page_metadata_cursor +
             i * MAX_PAGE_NUM_FOR_CHUNK;
         mem_pools[i].pages = NULL;
         for (int j = 0; j < MAX_PAGE_NUM_FOR_CHUNK; j++) {
@@ -873,7 +868,7 @@ void startup_allocator_init() {
 
     /* Every byte outside the Lab 4 usable range is unavailable. */
     memory_reserve((void*)BUDDY_END, (void*)BUDDY_ROOT_END);
-    memory_reserve((void*)BUDDY_METADATA_ADDR, (void*)current);
+    memory_reserve((void*)BUDDY_METADATA_ADDR, (void*)metadata_cursor);
     memory_reserve((void*)0x0000, (void*)0x1000);   // Spin tables
     memory_reserve((void*)_start,(void*) _end);     // Kernel image
 
@@ -1004,16 +999,16 @@ static int reserve_range(uintptr_t start, uintptr_t end) {
         }
 
         uintptr_t block_size = PAGE_SIZE << order;
-        buddy_block *target = get_block_by_page_idx_and_order(
+        buddy_block *target = block_for_page_and_order(
             (int)(cursor / PAGE_SIZE), 0);
         if (target != NULL) {
             (void)reserve_startup_allocations((unsigned int)block_size, target);
         }
-        buddy_block *reserved_block = get_block_by_page_idx_and_order(
+        buddy_block *reserved_block = block_for_page_and_order(
             (int)(cursor / PAGE_SIZE), order);
         if (target == NULL || reserved_block == NULL ||
-            reserved_block->status != BLOCK_RESERVED ||
-            get_entry_valid(reserved_block) != USED) {
+            reserved_block->status != BUDDY_BLOCK_RESERVED ||
+            get_node_availability(reserved_block) != BUDDY_NODE_IN_USE) {
             uart_puts("[buddy_init] unable to reserve range block\n");
             return -1;
         }
@@ -1024,63 +1019,70 @@ static int reserve_range(uintptr_t start, uintptr_t end) {
 
 // =================================== tool ===================================
 
-char* block_state_to_str(int status) {
+static char* block_state_to_str(int status) {
     switch (status) {
-        case BLOCK_ALLOCATED: return "ALLOCATED";
-        case BLOCK_RESERVED:    return "BLOCK_RESERVED";
-        case BLOCK_SPLIT:     return "SPLIT";
-        case BLOCK:           return "BLOCK";
-        case BLOCK_CHUNK:     return "CHUNK";
+        case BUDDY_BLOCK_RESERVED:   return "reserved";
+        case BUDDY_BLOCK_SPLIT:      return "split";
+        case BUDDY_BLOCK_DIRECT:     return "direct";
+        case BUDDY_BLOCK_CHUNK_PAGE: return "chunk-page";
         default:
-            if (status >= 0)
-                return "AVAILABLE";
-            else
-                return "UNKNOWN";
+            return "unknown";
     }
 }
 
-char* block_valid_to_str(int valid) {
-    switch (valid) {
-        case UNUSED: return "UNUSED";
-        case USED:   return "USED";
-        
-        default:
-            return "UNKNOWN";
+static char* node_availability_to_str(int availability) {
+    switch (availability) {
+        case BUDDY_NODE_AVAILABLE: return "available";
+        case BUDDY_NODE_IN_USE:    return "in-use";
+        default:                    return "unknown";
     }
 }
 
-int find_buddy_index(int index, int order) {
-    return index ^ (1 << order);
+static int buddy_first_page_for_order(int first_page, int order) {
+    return first_page ^ (1 << order);
 }
 
-void push_to_freelist(int order, buddy_block *blk) {
+static int block_count_for_order(int order) {
+    return 1 << (MAX_ORDER - order - 1);
+}
+
+static uintptr_t block_size_for_order(int order) {
+    return PAGE_SIZE << order;
+}
+
+/* Complete-binary-tree layout: the nodes for one order are contiguous. */
+static int node_index_for_order(int order, int local_block_index) {
+    return block_count_for_order(order) - 1 + local_block_index;
+}
+
+static void push_free_block(int order, buddy_block *blk) {
     if (buddy == NULL || blk == NULL || order < 0 || order >= MAX_ORDER ||
-        blk->in_free_list) {
+        blk->on_free_list) {
         return;
     }
 
-    blk->next = buddy->free_list[order];
-    if (buddy->free_list[order]) {
-        buddy->free_list[order]->prev = blk;
+    blk->next = buddy->free_lists[order];
+    if (buddy->free_lists[order]) {
+        buddy->free_lists[order]->prev = blk;
     }
     blk->prev = NULL;
-    buddy->free_list[order] = blk;
+    buddy->free_lists[order] = blk;
 
-    blk->status = BLOCK;
-    set_entry_valid(blk, UNUSED);
-    blk->in_free_list = 1;
+    blk->status = BUDDY_BLOCK_DIRECT;
+    set_node_availability(blk, BUDDY_NODE_AVAILABLE);
+    blk->on_free_list = 1;
 }
 
-void remove_from_freelist(int order, buddy_block *blk) {
+static void remove_free_block(int order, buddy_block *blk) {
     if (buddy == NULL || blk == NULL || order < 0 || order >= MAX_ORDER ||
-        !blk->in_free_list) {
+        !blk->on_free_list) {
         return;
     }
 
     if (blk->prev != NULL) {
         blk->prev->next = blk->next;
-    } else if (buddy->free_list[order] == blk) {
-        buddy->free_list[order] = blk->next;
+    } else if (buddy->free_lists[order] == blk) {
+        buddy->free_lists[order] = blk->next;
     } else {
         return;
     }
@@ -1090,38 +1092,24 @@ void remove_from_freelist(int order, buddy_block *blk) {
     }
     blk->prev = NULL;
     blk->next = NULL;
-    blk->in_free_list = 0;
+    blk->on_free_list = 0;
 }
 
-buddy_block *pop_from_freelist(int order) {
+static buddy_block *pop_free_block(int order) {
     if (buddy == NULL || order < 0 || order >= MAX_ORDER) {
         return NULL;
     }
 
-    buddy_block *blk = buddy->free_list[order];
+    buddy_block *blk = buddy->free_lists[order];
     if (blk == NULL) {
         return NULL;
     }
-    remove_from_freelist(order, blk);
+    remove_free_block(order, blk);
     return blk;
 }
 
-buddy_block *choose_from_freelist(int order, buddy_block* target_blk) {
-    if (buddy == NULL || target_blk == NULL || order < 0 || order >= MAX_ORDER) {
-        return NULL;
-    }
-
-    for(buddy_block* b = buddy->free_list[order]; b!=NULL; b = b->next){
-        if(b->idd == target_blk->idd){
-            remove_from_freelist(order, b);
-            return b;
-        }
-    }
-
-    return NULL;
-}
-
-buddy_block* lookup_alloc(void* addr) {
+/* Map an arbitrary pointer back to the in-use buddy node that contains it. */
+static buddy_block* lookup_allocated_block(void* addr) {
     if (buddy == NULL || addr == NULL) {
         return NULL;
     }
@@ -1132,17 +1120,17 @@ buddy_block* lookup_alloc(void* addr) {
     }
 
     for (int order = 0; order < MAX_ORDER; order++) {
-        uintptr_t block_size = PAGE_SIZE << order;
+        uintptr_t block_size = block_size_for_order(order);
         int local_block_index = (int)((address - BUDDY_START) / block_size);
-        int block_count = 1 << (MAX_ORDER - order - 1);
+        int block_count = block_count_for_order(order);
         if (local_block_index < 0 || local_block_index >= block_count) {
             continue;
         }
 
-        int global_block_index = block_count - 1 + local_block_index;
-        allocation_entry *entry = &buddy->alloc_table[global_block_index];
-        if (entry->valid == USED && entry->block != NULL &&
-            entry->block->status != BLOCK_SPLIT &&
+        int node_index = node_index_for_order(order, local_block_index);
+        buddy_node_entry *entry = &buddy->node_table[node_index];
+        if (entry->availability == BUDDY_NODE_IN_USE && entry->block != NULL &&
+            entry->block->status != BUDDY_BLOCK_SPLIT &&
             address >= (uintptr_t)entry->block->addr &&
             address < (uintptr_t)entry->block->addr + entry->block->size) {
             return entry->block;
@@ -1155,20 +1143,21 @@ void print_alloc(){
     if(DEBUG_ALL){
         uart_puts("[alloc]\n");
         for (int i = 0; i < MAX_ALLOC; i++) {
-            if ( 1||buddy->alloc_table[i].valid == USED) {
-                uart_put_hex((uintptr_t)buddy->alloc_table[i].addr);
+            buddy_node_entry *entry = &buddy->node_table[i];
+            if (entry->availability == BUDDY_NODE_IN_USE) {
+                uart_put_hex((uintptr_t)entry->block->addr);
                 uart_puts("\t");
-                uart_puts(block_valid_to_str(buddy->alloc_table[i].valid));
+                uart_puts(node_availability_to_str(entry->availability));
                 uart_puts("\t");
-                uart_putint(buddy->alloc_table[i].block->size);
+                uart_putint(entry->block->size);
                 uart_puts("\t");
-                uart_putint(buddy->alloc_table[i].block->idx);
+                uart_putint(entry->block->first_page);
                 uart_puts("\t");
-                uart_putint((uintptr_t)buddy->alloc_table[i].block->addr);
+                uart_putint((uintptr_t)entry->block->addr);
                 uart_puts("\t");
-                uart_putint(buddy->alloc_table[i].block->idd);
+                uart_putint(entry->block->node_id);
                 uart_puts("\t");
-                uart_puts(block_state_to_str(buddy->alloc_table[i].block->status));
+                uart_puts(block_state_to_str(entry->block->status));
                 
                 NL;
                 
@@ -1185,7 +1174,7 @@ void print_free_list() {
         uart_puts("Order ");
         uart_putint(order);
         uart_puts(":\t");
-        buddy_block *cur = buddy->free_list[order];
+        buddy_block *cur = buddy->free_lists[order];
         while (cur) {
             uart_puts(" [addr = ");
             uart_put_hex((uintptr_t)cur->addr);
@@ -1215,11 +1204,11 @@ void* allocate_new_chunk_page(memory_pool_t *pool) {
 
     int pool_index = (int)(pool - mem_pools);
     if (pool_index < 0 || pool_index >= NUM_POOLS ||
-        chunk_metadata_cursor == NULL) {
+        chunk_page_metadata_cursor == NULL) {
         return NULL;
     }
 
-    chunk_page_t *metadata_base = chunk_metadata_cursor +
+    chunk_page_t *metadata_base = chunk_page_metadata_cursor +
         pool_index * MAX_PAGE_NUM_FOR_CHUNK;
     chunk_page_t *new_pg = NULL;
     for (int i = 0; i < MAX_PAGE_NUM_FOR_CHUNK; i++) {
@@ -1255,7 +1244,7 @@ void* allocate_new_chunk_page(memory_pool_t *pool) {
     new_pg->next = pool->pages;
     pool->pages = new_pg;
     pool->num_page++;
-    // chunk_metadata_cursor += 1;
+    // chunk_page_metadata_cursor += 1;
     return page;
 }
 
@@ -1284,42 +1273,41 @@ void print_pool_state() {
     NL;
 }
 
-buddy_block* get_block_by_page_idx_and_order(int page_idx, int order) {
-    if (buddy == NULL || page_idx < 0 ||
-        page_idx >= (int)BUDDY_PAGE_COUNT || order < 0 ||
+static buddy_block* block_for_page_and_order(int page_index, int order) {
+    if (buddy == NULL || page_index < 0 ||
+        page_index >= (int)BUDDY_PAGE_COUNT || order < 0 ||
         order >= MAX_ORDER) {
         return NULL;
     }
 
     int pages_per_block = 1 << order;
-    int local_block_idx = page_idx / pages_per_block;
-    int level = MAX_ORDER - order - 1;
-    int block_count = 1 << level;
-    if (local_block_idx < 0 || local_block_idx >= block_count) {
+    int local_block_index = page_index / pages_per_block;
+    if (local_block_index < 0 ||
+        local_block_index >= block_count_for_order(order)) {
         return NULL;
     }
-    return buddy->alloc_table[block_count - 1 + local_block_idx].block;
+    return buddy->node_table[node_index_for_order(order, local_block_index)].block;
     
 }
 
-buddy_block* get_parent_block(buddy_block* blk){
-    if (blk == NULL || blk->idd <= 0) { // root
+static buddy_block* parent_block(buddy_block* blk){
+    if (blk == NULL || blk->node_id <= 0) { // root
         return NULL;
     }
-    return buddy->alloc_table[(blk->idd-1)/2].block;
+    return buddy->node_table[(blk->node_id-1)/2].block;
 }
 
-void set_entry_valid(buddy_block* blk, int val){
-    if (buddy != NULL && blk != NULL && blk->idd >= 0 && blk->idd < MAX_ALLOC) {
-        buddy->alloc_table[blk->idd].valid = val;
+static void set_node_availability(buddy_block* blk, int availability){
+    if (buddy != NULL && blk != NULL && blk->node_id >= 0 && blk->node_id < MAX_ALLOC) {
+        buddy->node_table[blk->node_id].availability = availability;
     }
 }
 
-int get_entry_valid(buddy_block* blk){
-    if (buddy == NULL || blk == NULL || blk->idd < 0 || blk->idd >= MAX_ALLOC) {
-        return USED;
+static int get_node_availability(buddy_block* blk){
+    if (buddy == NULL || blk == NULL || blk->node_id < 0 || blk->node_id >= MAX_ALLOC) {
+        return BUDDY_NODE_IN_USE;
     }
-    return buddy->alloc_table[blk->idd].valid;
+    return buddy->node_table[blk->node_id].availability;
 }
 
 int in_chunk_freelist(memory_pool_t* m_pool, void* add){
@@ -1342,20 +1330,20 @@ int be_used(void* page_addr){
     if (address < BUDDY_START || address >= BUDDY_ROOT_END) {
         return 0;
     }
-    uint32_t idx = (uint32_t)((address - BUDDY_START) / PAGE_SIZE);
-    buddy_block* blk = get_block_by_page_idx_and_order(idx, 0);
+    uint32_t first_page = (uint32_t)((address - BUDDY_START) / PAGE_SIZE);
+    buddy_block* blk = block_for_page_and_order(first_page, 0);
     for(uint32_t i = 0; i < MAX_ORDER; ++i){
         if (blk == NULL) {
             return 0;
         }
-        if(blk->in_free_list)return 1;
-        blk = get_parent_block(blk);
+        if(blk->on_free_list)return 1;
+        blk = parent_block(blk);
     }
 
     return 0;
 
     // for(uint32_t i=0;i<MAX_ORDER;++i)
-    // for(buddy_block* b = buddy->free_list[i]; b!= NULL; b=b->next){
+    // for(buddy_block* b = buddy->free_lists[i]; b!= NULL; b=b->next){
     //     if(b->addr == page_addr){
     //         return 1;
     //     }

@@ -68,6 +68,7 @@ thread_t *thread_create(void *fn, void *arg) {
   t->user_stack = NULL;
   t->user_stack_size = 0;
   t->is_user = 0;
+  t->active_signal = THREAD_NO_ACTIVE_SIGNAL;
 
   lock();
   if (!run_queue) {
@@ -141,6 +142,8 @@ void kill_zombies(void) {
 
       if (t->user_stack)
         kfree(t->user_stack);
+      if (t->signal_stack)
+        kfree(t->signal_stack);
       if (t->sp)
         kfree(t->sp);
       kfree(t);
