@@ -11,6 +11,8 @@
 #define AUXINIT_BIT_POSTION 1<<29
 extern int test_type;
 
+#define EXCEPTION_FRAME_SIZE (32 * 9)
+
 typedef struct trap_frame{
   uint64_t x0;
   uint64_t x1;
@@ -53,10 +55,10 @@ void enable_interrupts();
 
 // general
 void exception_entry();
-void irq_handler_function();
+trap_frame_t *irq_handler_function(trap_frame_t *tf);
 
 // system call
-int c_system_call_handler(trap_frame_t *tf);
+trap_frame_t *c_system_call_handler(trap_frame_t *tf);
 
 // timer
 void core_timer_handler_function();

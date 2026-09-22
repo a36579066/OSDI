@@ -4,13 +4,23 @@
 
 user_main:
     // 1) fork()
-    //mov     x8, #4        // syscall #4 = fork
-    //svc     #0            // 返回时：parent->x0=child pid, child->x0=0
+    mov     x8, #4        // syscall #4 = fork
+    svc     #0            // parent: x0=child pid, child: x0=0
 
-    //cmp     x0, #0
-    //b.ne    .parent       // 如果 x0 != 0，则是 parent
+    // fork 的回傳值必須在任何 uart_write 前保存。
+    // parent: x19 = child PID；child: x19 = 0。
+    mov     x19, x0
+    cbz     x19, .child
+    b       .parent
 
     // ------------ child ------------
+
+.child:
+    // 這個訊息代表 child 已經被 scheduler 切換並開始執行。
+    adr     x0, child_msg
+    mov     x1, #6        // len("CHILD\n")
+    mov     x8, #2        // uart_write
+    svc     #0
 
     // 2) exec("hello_exec.bin", NULL)
     adr     x0, prog_name // x0 = &"hello_exec.bin"
@@ -31,12 +41,11 @@ user_main:
 
     // （可选）打印一下 child pid
     adr     x0, parent_msg
-    mov     x1, #16       // len("in parent, pid=")==16
+    mov     x1, #15       // len("in parent, pid=")==15
     mov     x8, #2
     svc     #0
 
-    // 把 x0（child pid）转成 ASCII 并打印
-    mov     x19, x0       // 保存 child pid
+    // x19 仍然保存 fork() 回傳的 child PID。
     adr     x0, num_buf
     mov     w1, w19
     add     w1, w1, #'0'
@@ -56,6 +65,8 @@ user_main:
     .section .rodata
 prog_name:
     .asciz "hello_exec.bin"
+child_msg:
+    .ascii "CHILD\n"
 err_msg:
     .ascii "exec failed in child\n"
 parent_msg:

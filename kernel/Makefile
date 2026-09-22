@@ -1,10 +1,20 @@
 # Toolchain
+.PHONY: all clean run debug demo debug-table
+
 CC = aarch64-linux-gnu-gcc
 LD = aarch64-linux-gnu-ld
 OBJCOPY = aarch64-linux-gnu-objcopy
 
+# Debug switches can be overridden from the command line, for example:
+#   make -C kernel -B ALLOC_DEBUG=1 run
+ALLOC_DEBUG ?= 0
+ALLOC_DEMO ?= 0
+ALLOC_DEBUG_ALL ?= 0
+
 # Compilation flags
-CFLAGS = -Wall -nostdlib -ffreestanding -Iinclude -I../common/include -g
+CFLAGS = -Wall -nostdlib -ffreestanding -Iinclude -I../common/include -g \
+	-DALLOC_DEBUG=$(ALLOC_DEBUG) -DALLOC_DEMO=$(ALLOC_DEMO) \
+	-DALLOC_DEBUG_ALL=$(ALLOC_DEBUG_ALL)
 LDFLAGS = -T src/linker.ld
 
 # Directories
@@ -57,3 +67,13 @@ clean:
 # Run in QEMU
 run: $(IMG)
 	qemu-system-aarch64 -M raspi3b -kernel $(IMG) -dtb bcm2710-rpi-3-b-plus.dtb -initrd ../initramfs.cpio -serial null -serial stdio
+
+# Rebuild is intentional: Make does not track changes to compiler variables.
+debug:
+	$(MAKE) -B ALLOC_DEBUG=1 run
+
+demo:
+	$(MAKE) -B ALLOC_DEBUG=1 ALLOC_DEMO=1 run
+
+debug-table:
+	$(MAKE) -B ALLOC_DEBUG=1 ALLOC_DEBUG_ALL=1 run

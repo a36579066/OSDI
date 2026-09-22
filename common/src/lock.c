@@ -1,23 +1,28 @@
 #include "lock.h"
 
+/*
+ * This project currently runs one active core.  Keep a nesting depth so a
+ * nested lock does not re-enable IRQs belonging to an outer critical section,
+ * and remember the state that existed before the first lock.
+ */
 static unsigned long long lock_count = 0;
+static irq_state_t lock_saved_state = 0;
 
 void lock(void){
-    asm volatile(
-        "msr daifset, 0xf;"
-    );
+    if (lock_count == 0)
+        lock_saved_state = irq_save();
+    else
+        irq_disable();
     lock_count++;
 }
 
 void unlock(void){
-    lock_count--;
-    if(lock_count == 0){
-        asm volatile(
-            "msr daifclr, 0xf;"
-        );
-    }
-    else if(lock_count < 0){
+    if (lock_count == 0) {
         uart_puts("Unlock without lock\n");
         while(1);
     }
+
+    lock_count--;
+    if(lock_count == 0)
+        irq_restore(lock_saved_state);
 }

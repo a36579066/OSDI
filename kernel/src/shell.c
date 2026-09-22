@@ -19,6 +19,15 @@ static inline void delay(int count) {
   }
 }
 
+static void async_shell_clear_buffers(void)
+{
+    irq_state_t state = irq_save();
+    uart_rx_tail = 0;
+    uart_tx_tail = 0;
+    uart_tx_head = 0;
+    irq_restore(state);
+}
+
 void shell() {
     char command_buffer[MAX_CMD_LEN]; 
     // int pos = 0;
@@ -115,22 +124,28 @@ void shell() {
 }
 
 void async_shell() {
-    // uart_puts("in shell");
     int flag = 1; // 判斷是否輸出 #
-    disable_interrupts();
-    char* ptr = uart_rx_buffer;
+    char command_buffer[UART_BUF_SIZE];
+
+    /* Take a private snapshot.  Parsing and executing a command must not
+     * keep the UART IRQ masked for the whole duration of the command. */
+    irq_state_t state = irq_save();
+    unsigned int command_len = 0;
+    while (command_len + 1 < UART_BUF_SIZE &&
+           uart_rx_buffer[command_len] != '\0') {
+        command_buffer[command_len] = uart_rx_buffer[command_len];
+        command_len++;
+    }
+    command_buffer[command_len] = '\0';
+    uart_rx_tail = 0;
+    irq_restore(state);
+
+    char* ptr = command_buffer;
     char* token = get_token(&ptr);
-    
-    // enable_interrupts();
 
     if (!token){
         uart_puts("\n# ");
-        disable_interrupts();
-        uart_rx_tail = 0;
-        uart_tx_tail = 0;
-        uart_tx_head = 0;
-        enable_interrupts();
-        // memset_(uart_rx_buffer, 0, UART_BUF_SIZE);
+        async_shell_clear_buffers();
         return;
     };
     // int pos = 0;
@@ -238,11 +253,7 @@ void async_shell() {
         char* num_str = get_token(&ptr);
         if (num_str == 0) {
             uart_puts("Error: no allocation size provided.\n");
-            disable_interrupts();
-            uart_rx_tail = 0;
-            uart_tx_tail = 0;
-            uart_tx_head = 0;
-            enable_interrupts();
+            async_shell_clear_buffers();
             if(flag) uart_puts("# ");
             return;
         }
@@ -295,33 +306,32 @@ void async_shell() {
         
     }
     else if(strcmp_(token, "process") == 0){
-        disable_interrupts();
-        uart_rx_tail = 0;
-        uart_tx_tail = 0;
-        uart_tx_head = 0;
-        enable_interrupts();
-        // 1. 建 kernel thread (idle, foo, ...)
+        // 1. 建立 idle thread
         thread_init();
 
         // // 2. 建第一個 user process
         //    entry_point = user_main, user_sp = USER_STACK_TOP
         
-        // thread_t *u = process_create((uint64_t)user_space, USER_STACK_TOP+10000);
-        thread_t *u = thread_create(init_user_prog, 0);
+        thread_t *u = start_user_process("syscall.img");
         
         // asm volatile("mov x0, 0  \n");
         // asm volatile("msr spsr_el1, x0   \n"); 
         // asm volatile("msr elr_el1,%0" ::"r"(u->context.lr));
         // asm volatile("msr sp_el0,%0" :: "r"(u->context.sp));
         // asm volatile("eret");
-        u->status = THREAD_READY;  // process_create 沒 enqueue 的話要補
+        if (!u) {
+            irq_enable();
+            uart_enable_interrupt();
+            uart_puts("Unable to start syscall.img\n");
+            return;
+        }
 
         // 3. 一進 scheduler 就會選到 user process
         // schedule();
         idle_task();
         
         // 不會回到這裡
-        while (1) { /* safe‐spin */ }
+        while (1) { /* unreachable */ }
     }
     else {
         uart_puts("Unknown command: ");
@@ -330,12 +340,7 @@ void async_shell() {
     }
     
     // 清空 buffer，準備下一次輸入
-    disable_interrupts();
-    uart_rx_tail = 0;
-    uart_tx_tail = 0;
-    uart_tx_head = 0;
-    enable_interrupts();
-    // memset_(uart_rx_buffer, 0, UART_BUF_SIZE);
+    async_shell_clear_buffers();
     if(flag) uart_puts("# ");
     
 }

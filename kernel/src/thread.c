@@ -6,17 +6,37 @@ int next_pid = 0;
 static int num_thread = 0;
 
 static inline void delay(int count) {
-  while (count--) asm volatile("nop");
+  while (count--)
+    asm volatile("nop");
+}
+
+static trap_frame_t *kernel_frame(thread_t *t) {
+  return (trap_frame_t *)((uintptr_t)t->sp + THREAD_STK_SIZE -
+                          EXCEPTION_FRAME_SIZE);
+}
+
+static void init_kernel_frame(thread_t *t) {
+  trap_frame_t *tf = kernel_frame(t);
+  memset_(tf, 0, sizeof(*tf));
+  tf->spsr_el1 = 0x5;              // EL1h
+  tf->elr_el1 = (uint64_t)idle_task;
+  t->trapframe = tf;
 }
 
 //------------------------------------------------------------------------------
 // thread_init: 建立 idle task，並設為 current
 //------------------------------------------------------------------------------
 void thread_init(void) {
+  if (cur_thread != NULL)
+    return;
+
   lock();
   thread_t *idle = thread_create(idle_task, NULL);
+  if (idle == NULL) {
+    unlock();
+    return;
+  }
   cur_thread = idle;
-  // 把 cur_thread 放到 TPIDR_EL1，以便 exception handler 快取
   asm volatile("msr tpidr_el1, %0" :: "r"(idle));
   uart_puts("Thread system initialized.\n");
   unlock();
@@ -26,271 +46,259 @@ void thread_init(void) {
 // thread_create: 建 kernel-thread
 //------------------------------------------------------------------------------
 thread_t *thread_create(void *fn, void *arg) {
-  // 1) 分配 PCB
-  thread_t *t = (thread_t*)kmalloc(sizeof(thread_t));
-  if (!t) return NULL;
-  memset_((char*)&t->context, 0, sizeof(thread_context_t));
+  thread_t *t = (thread_t *)kmalloc(sizeof(thread_t));
+  if (!t)
+    return NULL;
 
-  // 2) 分配 kernel stack
+  memset_(t, 0, sizeof(*t));
   t->sp = kmalloc(THREAD_STK_SIZE);
   if (!t->sp) {
-      kfree(t);
-      return NULL;
+    kfree(t);
+    return NULL;
   }
-  
-  // 3) 初始化 context，讓 switch_to 後跳到 fn(arg)
+
   uint64_t stack_top = (uint64_t)t->sp + THREAD_STK_SIZE;
-  t->context.sp = stack_top;   // SP
-  t->context.fp = stack_top;   // FP
-  t->context.lr = (uint64_t)fn; // LR ← fn
+  t->context.sp = stack_top;
+  t->context.fp = stack_top;
+  t->context.lr = (uint64_t)fn;
+  t->pid = next_pid++;
+  t->status = THREAD_READY;
+  t->trapframe = NULL;
+  t->pagetable = NULL;
+  t->user_stack = NULL;
+  t->user_stack_size = 0;
+  t->is_user = 0;
 
-  // 4) 其他欄位
-  t->pid        = next_pid++;
-  t->status     = THREAD_READY;
-  t->trapframe  = NULL;        // kernel-thread 不用 trapframe
-  t->pagetable  = NULL;        // 未用 MMU 時保留 NULL
-
-  // 5) 插入 run_queue
   lock();
   if (!run_queue) {
-      run_queue = t->next = t->prev = t;
+    run_queue = t->next = t->prev = t;
   } else {
-      thread_t *tail = run_queue->prev;
-      tail->next = t;
-      t->prev     = tail;
-      t->next     = run_queue;
-      run_queue->prev = t;
+    thread_t *tail = run_queue->prev;
+    tail->next = t;
+    t->prev = tail;
+    t->next = run_queue;
+    run_queue->prev = t;
   }
   num_thread++;
   unlock();
-
+  (void)arg;
   return t;
 }
 
 //------------------------------------------------------------------------------
-// schedule: Round-robin
+// schedule: Round-robin for kernel threads
 //------------------------------------------------------------------------------
 void schedule(void) {
-  if (!cur_thread || !run_queue) return;
-  
+  if (!cur_thread || !run_queue)
+    return;
+
   lock();
   thread_t *prev = cur_thread;
   thread_t *next = prev->next;
-
-  // 找下一個非 ZOMBIE
   while (next != prev && next->status == THREAD_ZOMBIE)
-      next = next->next;
-  if (next->status == THREAD_ZOMBIE) {
-      unlock();
-      return;
+    next = next->next;
+
+  if (next == prev || next->status == THREAD_ZOMBIE) {
+    if (prev->status != THREAD_ZOMBIE)
+      prev->status = THREAD_RUNNING;
+    unlock();
+    return;
   }
-  uart_puts("[schedule] cur_thread id: ");
-  uart_putint(cur_thread->pid);NL;
+
+  /* A thread that called exit has already become ZOMBIE.  Keep that state
+   * so idle_task() can reclaim it after the context switch. */
+  if (prev->status != THREAD_ZOMBIE)
+    prev->status = THREAD_READY;
   cur_thread = next;
   cur_thread->status = THREAD_RUNNING;
-  
-  // 切換 context (含 kernel SP/PC)
-  uart_puts("[schedule] next->context.lr): ");
-  uart_put_hex(next->context.lr);
-  uart_puts("  next_mem: ");
-  uart_put_hex(next);NL;
-  // cur_thread->context.lr += 80;
+  asm volatile("msr tpidr_el1, %0" :: "r"(cur_thread));
+  unlock();
+
   switch_to(&prev->context, &next->context);
+}
+
+//------------------------------------------------------------------------------
+// kill_zombies: 回收所有非-current 的 ZOMBIE thread
+//------------------------------------------------------------------------------
+void kill_zombies(void) {
+  if (!run_queue)
+    return;
+
+  lock();
+  thread_t *t = run_queue;
+  int remaining = num_thread;
+  while (run_queue && t && remaining-- > 0) {
+    thread_t *next = t->next;
+    if (t != cur_thread && t->status == THREAD_ZOMBIE) {
+      if (t->next == t) {
+        run_queue = NULL;
+      } else {
+        t->prev->next = t->next;
+        t->next->prev = t->prev;
+        if (run_queue == t)
+          run_queue = t->next;
+      }
+
+      if (t->user_stack)
+        kfree(t->user_stack);
+      if (t->sp)
+        kfree(t->sp);
+      kfree(t);
+      num_thread--;
+      if (!run_queue)
+        break;
+    }
+    t = next;
+  }
   unlock();
 }
 
-//------------------------------------------------------------------------------
-// kill_zombies: 回收所有 ZOMBIE thread
-//------------------------------------------------------------------------------
-void kill_zombies(void) {
-  if (!run_queue) return;
+static int has_runnable_other_thread(void) {
+  if (!cur_thread || !run_queue)
+    return 0;
 
-  thread_t *t = run_queue;
+  int found = 0;
+  lock();
+  thread_t *candidate = run_queue;
   do {
-      thread_t *n = t->next;
-      if (t->status == THREAD_ZOMBIE) {
-          // 拔掉 run_queue 裡的節點
-          if (t == run_queue) run_queue = n;
-          t->prev->next = t->next;
-          t->next->prev = t->prev;
-
-          uart_puts("kill pid: ");
-          uart_putint(t->pid);NL;
-          // 釋放資源
-          kfree(t->sp);
-          kfree(t);
-          num_thread--;
-      }
-      t = n;
-  } while (t != run_queue);
+    if (candidate != cur_thread && candidate->status != THREAD_ZOMBIE) {
+      found = 1;
+      break;
+    }
+    candidate = candidate->next;
+  } while (candidate != run_queue);
+  unlock();
+  return found;
 }
 
 //------------------------------------------------------------------------------
-// idle_task: 只回收zombie並讓出 CPU
+// idle_task: 回收 zombie；沒有 runnable thread 時才睡眠
 //------------------------------------------------------------------------------
 void idle_task(void) {
   while (1) {
       kill_zombies();
       schedule();
+
+      /* A kernel thread voluntarily switches back to idle.  Do not sleep
+       * while another runnable thread is waiting for its turn. */
+      if (has_runnable_other_thread())
+        continue;
+
+      irq_enable();
+      asm volatile("wfi" ::: "memory");
   }
 }
-
 
 //------------------------------------------------------------------------------
 // foo: 範例 kernel-thread
 //------------------------------------------------------------------------------
 void foo(void) {
   for (int i = 0; i < 10; i++) {
-      uart_puts("Thread "); uart_putint(cur_thread->pid);
-      uart_puts(" iter "); uart_putint(i); uart_puts("\n");
-      delay(1000000);
-      schedule();
+    uart_puts("Thread ");
+    uart_putint(cur_thread->pid);
+    uart_puts(" iter ");
+    uart_putint(i);
+    uart_puts("\n");
+    delay(1000000);
+    schedule();
   }
-  // 做完就標為 ZOMBIE
   cur_thread->status = THREAD_ZOMBIE;
   schedule();
+  while (1)
+    asm volatile("wfe");
 }
 
-void init_user_prog(void)
-{       thread_t* cur_t = get_current();
-        struct cpio_file file = parse_or_find_file_in_archive("syscall.img", 1);
-        if (file.size == 0) {
-            uart_puts("Error: File not found in initramfs.\n");
-            return;
-        }
-        uart_puts("found file: ");
-        uart_puts(file.filename);NL;
-        uart_putint(file.size);NL;
-        // char* user_program_addr = simple_malloc(64);
-        char* user_program_addr = kmalloc(file.size+8);
-        kfree(cur_t->sp);
-        // 分配記憶體來放 user program
-        void* user_space = (void*) user_program_addr;
-        memcpy_(user_space, file.data, file.size);
-        uint64_t USER_STACK = (uint64_t)(uintptr_t)kmalloc(10000);
-        cur_t->sp = USER_STACK;
-        unsigned long spsr_el1 = 0x3c0;
-	      asm volatile ("msr spsr_el1, %0" ::"r"(spsr_el1));
-        asm volatile("msr elr_el1,%0" ::"r"(user_space));
-        asm volatile("msr sp_el0,%0" :: "r"(USER_STACK+10000));
-        asm volatile("eret");
+// Kept for compatibility with the old shell path.  New user programs are
+// created by start_user_process() and entered through process_create().
+void init_user_prog(void) {
+  while (1)
+    schedule();
 }
 
 //------------------------------------------------------------------------------
 // process_create: 建 user-process，設定 trapframe + eret entry
 //------------------------------------------------------------------------------
 thread_t *process_create(uint64_t entry_point, uint64_t user_sp) {
-  // 1) 先當成 kernel-thread 建
   thread_t *t = thread_create(NULL, NULL);
+  if (!t)
+    return NULL;
 
-  // 2) 在 kernel stack 最頂端放 trap_frame
-  uint64_t ksp = t->context.sp;
-  t->trapframe = (trap_frame_t*)(ksp - sizeof(trap_frame_t));
-  memset_((void*)t->trapframe, 0, sizeof(*t->trapframe));
+  uint64_t ksp = (uint64_t)t->sp + THREAD_STK_SIZE;
+  t->trapframe = (trap_frame_t *)(ksp - EXCEPTION_FRAME_SIZE);
+  memset_(t->trapframe, 0, sizeof(*t->trapframe));
+  t->trapframe->elr_el1 = entry_point;
+  t->trapframe->sp_el0 = user_sp;
+  t->trapframe->spsr_el1 = 0;       // EL0t, IRQ/FIQ enabled
+  t->is_user = 1;
 
-  // 3) 初始化 EL0 狀態
-  t->trapframe->elr_el1  = entry_point; // user PC
-  t->trapframe->sp_el0   = user_sp;     // user SP
-  t->trapframe->spsr_el1 = 0;           // PSTATE: EL0, IRQ/FIQ enabled
-  // x0–x7, x8(..syscall#) 皆為 0
-
-  // 4) 改寫 thread context，讓它從 eret_to_user 進 EL0
+  // switch_to() loads this context and returns into eret_to_user(), which
+  // restores the complete frame and enters EL0.
   t->context.sp = (uint64_t)t->trapframe;
-  t->context.lr = (uint64_t)entry_point;
-
-  // 5) 插入 run_queue
-  lock();
-  if (!run_queue) {
-      run_queue = t->next = t->prev = t;
-  } else {
-      thread_t *tail = run_queue->prev;
-      tail->next = t;
-      t->prev     = tail;
-      t->next     = run_queue;
-      run_queue->prev = t;
-  }
-  num_thread++;
-  unlock();
-
-  // uart_puts("[creat start]\n");
-  // uart_puts("pid: ");
-  // uart_putint(t->pid);NL;
-  // uart_puts("sp: ");
-  // uart_putint(t->sp);NL;
-  // uart_puts("context->sp: ");
-  // uart_putint(t->context.sp);NL;
-  // uart_puts("[creat end]\n");
+  t->context.lr = (uint64_t)eret_to_user;
   return t;
 }
-/*
-void fork_test(void){
-  uart_puts("\nFork Test, pid: ");
-  uart_putint(call_get_pid());
-  NL;
-  
-  int cnt = 1;
-  int ret = 0;
-  void *stack;
-  stack = kmalloc(THREAD_STK_SIZE);
 
-  if ((ret = call_sys_clone(0, 0, (uint64_t)stack)) == 0) { // child
-      long long cur_sp;
-      asm volatile("mov %0, sp" : "=r"(cur_sp));
-      gdb();
-      uart_puts("first child pid: ");
-      uart_putint(call_get_pid());
-      uart_puts(", cnt: ");
-      uart_putint(cnt);
-      uart_puts(", ptr: ");
-      uart_b2x_64((unsigned long long)&cnt);
-      uart_puts(", sp : ");
-      uart_b2x_64(cur_sp);
-      NL;
-      ++cnt;
-      stack = kmalloc(THREAD_STK_SIZE);
+static thread_t *next_user_thread(thread_t *from) {
+  if (!from || !run_queue)
+    return NULL;
 
-      if ((ret = sys_fork() ) != 0){
-          asm volatile("mov %0, sp" : "=r"(cur_sp));
-          
-          uart_puts("first(2) child pid: ");
-          uart_itoa(call_get_pid());
-          uart_puts(", cnt: ");
-          uart_itoa(cnt);
-          uart_puts(", ptr: ");
-          uart_b2x_64((unsigned long long)&cnt);
-          uart_puts(", sp : ");
-          uart_b2x_64(cur_sp);
-          uart_putc('\n');
-      }
-      else{
-          while (cnt < 5) {
-              asm volatile("mov %0, sp" : "=r"(cur_sp));
-              
-              uart_puts("second child pid: ");
-              uart_itoa(call_get_pid());
-              uart_puts(", cnt: ");
-              uart_itoa(cnt);
-              uart_puts(", ptr: ");
-              uart_b2x_64((unsigned long long)&cnt);
-              uart_puts(", sp : ");
-              uart_b2x_64(cur_sp);
-              uart_putc('\n');
-
-              delay(1000000);
-              ++cnt;
-          }
-      }
-      call_exit();
+  thread_t *candidate = from->next;
+  while (candidate != from) {
+    if (candidate->is_user && candidate->status != THREAD_ZOMBIE &&
+        candidate->trapframe != NULL)
+      return candidate;
+    candidate = candidate->next;
   }
-  else {
-      gdb();
-      uart_puts("parent here, pid ");
-      uart_itoa(call_get_pid());
-      uart_puts(", child ");
-      uart_itoa(ret);
-      uart_putc('\n');
-      call_exit();
-  }
+  return NULL;
 }
-*/
 
+trap_frame_t *schedule_from_irq(trap_frame_t *tf) {
+  if (!tf || !cur_thread || !run_queue)
+    return tf;
+
+  // The frame lives on this thread's kernel stack.  It remains valid while
+  // another user thread is running and becomes the resume point later.
+  cur_thread->trapframe = tf;
+  if (!cur_thread->is_user)
+    return tf;
+
+  thread_t *next = next_user_thread(cur_thread);
+  if (!next)
+    return tf;
+
+  cur_thread->status = THREAD_READY;
+  cur_thread = next;
+  cur_thread->status = THREAD_RUNNING;
+  asm volatile("msr tpidr_el1, %0" :: "r"(cur_thread));
+  return cur_thread->trapframe;
+}
+
+trap_frame_t *exit_current_thread(trap_frame_t *tf, int status) {
+  if (!tf || !cur_thread)
+    return tf;
+
+  cur_thread->trapframe = tf;
+  cur_thread->status = THREAD_ZOMBIE;
+
+  thread_t *next = next_user_thread(cur_thread);
+  if (!next) {
+    thread_t *candidate = cur_thread->next;
+    while (candidate != cur_thread && candidate->status == THREAD_ZOMBIE)
+      candidate = candidate->next;
+    if (candidate != cur_thread) {
+      if (candidate->trapframe == NULL)
+        init_kernel_frame(candidate);
+      next = candidate;
+    }
+  }
+
+  if (next) {
+    cur_thread = next;
+    cur_thread->status = THREAD_RUNNING;
+    asm volatile("msr tpidr_el1, %0" :: "r"(cur_thread));
+    return cur_thread->trapframe;
+  }
+
+  (void)status;
+  return tf;
+}

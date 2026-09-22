@@ -81,10 +81,15 @@ from_el2_to_el1:
     stp x26, x27, [sp ,16 * 13]
     stp x28, x29, [sp ,16 * 14]
     str x30, [sp, 16 * 15]
+    // Keep the saved frame layout identical to trap_frame_t:
+    // x0..x28, fp, lr, spsr_el1, elr_el1, sp_el0.
     mrs x0, spsr_el1
     mrs x1, elr_el1
-    stp x0, x1, [sp, 16 * 16]
-    ldp x0, x1, [sp, 16 * 0] 
+    mrs x2, sp_el0
+    str x0, [sp, 248]
+    str x1, [sp, 256]
+    str x2, [sp, 264]
+    // ldp x0, x1, [sp, 16 * 0] 
 .endm
 
 // load general registers from stack
@@ -105,9 +110,12 @@ from_el2_to_el1:
     ldp x26, x27, [sp ,16 * 13]
     ldp x28, x29, [sp ,16 * 14]
     ldr x30, [sp, 16 * 15]
-    ldp x0, x1, [sp, 16 * 16]
+    ldr x0, [sp, 248]
     msr spsr_el1, x0
-    msr elr_el1, x1
+    ldr x0, [sp, 256]
+    msr elr_el1, x0
+    ldr x0, [sp, 264]
+    msr sp_el0, x0
     ldp x0, x1, [sp ,16 * 0]
     add sp, sp, 32 * 9
 .endm
@@ -120,10 +128,9 @@ exception_handler:
 
 syscall_handler:
   save_all
-  mov x0, sp              // get trap frame(which is the same thing we just saved, meaning that we might modified user space registers)
+  mov x0, sp              // pass the saved trap frame
   bl c_system_call_handler
-  mov x1, sp
-  str x0, [x1, 0]         // save return value to trap frame
+  mov sp, x0              // the syscall may switch to another user thread
   load_all
   eret
 
@@ -132,6 +139,7 @@ core_timer_enable:
   mov x0, 1
   msr cntp_ctl_el0, x0 // enable
   mrs x0, cntfrq_el0
+  lsr x0, x0, #5 // Lab 5 preemption period: core frequency >> 5
   msr cntp_tval_el0, x0 // set expired time
 
 
@@ -152,7 +160,9 @@ core_timer_handler:
 
 irq_handler:
   save_all
+  mov x0, sp              // pass the saved trap frame
   bl irq_handler_function
+  mov sp, x0              // the timer may switch to another user thread
   load_all
   eret
 
@@ -214,4 +224,4 @@ get_dtb_addr:
     ret   
 
 .section .data
-dtb_addr: .quad 0  
+dtb_addr: .quad 0

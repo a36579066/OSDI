@@ -49,9 +49,9 @@ static void schedule_timer(timer_callback callback, void *data, uint64_t seconds
   asm volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
   new_timer->expiry = current_time + seconds * cntfrq;
   
-  disable_interrupts();
+  irq_state_t state = irq_save();
   insert_timer(new_timer);
-  enable_interrupts();
+  irq_restore(state);
 }
 
 static void print_message(void *data) {
@@ -65,7 +65,6 @@ static void print_message(void *data) {
   uart_putint(current_time / cntfrq);
   uart_puts(" s)");
   uart_puts("\n");
-  kfree(data);
 }
 
 void setTimeout(char *message, uint64_t seconds) {

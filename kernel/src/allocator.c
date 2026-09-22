@@ -5,9 +5,21 @@
 #include <device_tree.h>
 #include <ramdisk.h>
 
-int DEBUG = 0;
-int DEMO =  0;
-#define DEBUG_ALL 0
+#ifndef ALLOC_DEBUG
+#define ALLOC_DEBUG 0
+#endif
+
+#ifndef ALLOC_DEMO
+#define ALLOC_DEMO 0
+#endif
+
+#ifndef ALLOC_DEBUG_ALL
+#define ALLOC_DEBUG_ALL 0
+#endif
+
+int DEBUG = ALLOC_DEBUG;
+int DEMO = ALLOC_DEMO;
+#define DEBUG_ALL ALLOC_DEBUG_ALL
 
 
 static char* heap_ptr = &_heap_start;
@@ -39,6 +51,7 @@ buddy_block* get_parent_block(buddy_block* blk);
 void push_to_freelist(int order, buddy_block *blk);
 buddy_block* pop_from_freelist(int order);
 buddy_block* choose_from_freelist(int order, buddy_block* target_blk);
+void remove_from_freelist(int order, buddy_block *blk);
 void set_entry_valid(buddy_block* blk, int val);
 int get_entry_valid(buddy_block* blk);
 
@@ -49,6 +62,7 @@ buddy_block* lookup_alloc(void* addr);
 buddy_block* get_block_by_page_idx_and_order(int page_idx, int order);
 int in_chunk_freelist(memory_pool_t* m_pool, void* add);
 int be_used(void* page_addr);
+static int reserve_range(uintptr_t start, uintptr_t end);
 /* ===================================================================== */
 
 /* ==================== some tools for memory pool ==================== */
@@ -57,18 +71,19 @@ int find_pool_index(size_t size);
 /* ===================================================================== */
 
 void* simple_malloc(size_t size) {
-    disable_interrupts();
+    irq_state_t state = irq_save();
     //  8-byte alignment
     align(&heap_ptr, 8); 
     char* start_addr = heap_ptr;
     
-    if (heap_ptr + size > &_heap_end) {
+    if ((uintptr_t)heap_ptr + size > (uintptr_t)&_heap_end) {
+        irq_restore(state);
         return NULL;  // not enough space
     }
 
-    heap_ptr += size;
+    heap_ptr = (char *)((uintptr_t)heap_ptr + size);
     // uart_put_hex((uint32_t)(uintptr_t)heap_ptr);
-    enable_interrupts();
+    irq_restore(state);
     return start_addr;
 }
 
@@ -85,17 +100,17 @@ void buddy_init() {
     
 
     // 建立最上層 block
-    allocation_entry *entry = &(buddy->alloc_table[buddy_block_cursor]);
-    buddy_block_cursor += 1;
-    
-    entry->block->idx = 0;
-    entry->block->status = BLOCK;
-    entry->block->addr = (void *)BUDDY_START;
-    entry->block->size = (PAGE_SIZE << (MAX_ORDER - 1));
-    entry->block->prev = NULL;
-    entry->block->next = NULL;
-    entry->block->in_free_list = 1;
-    buddy->free_list[MAX_ORDER - 1] = entry->block;
+    buddy_block_cursor = 1;
+    buddy_block *root = buddy->alloc_table[0].block;
+    root->idx = 0;
+    root->status = BLOCK;
+    root->addr = (void *)BUDDY_START;
+    root->size = BUDDY_ROOT_SIZE;
+    root->prev = NULL;
+    root->next = NULL;
+    root->in_free_list = 0;
+    set_entry_valid(root, UNUSED);
+    push_to_freelist(MAX_ORDER - 1, root);
     
 
     uart_puts("Buddy init complete with free list!\n\n");
@@ -103,19 +118,9 @@ void buddy_init() {
     // 處理先前 reserved 的 region
     for(int i = 0; i < reserved_count; ++i){
         reserved_range_t range = reserved_ranges[i];
-        uintptr_t start = align_down(range.start, PAGE_SIZE);
-        uintptr_t end   = align_down(range.end, PAGE_SIZE);
-        int start_idx = start/PAGE_SIZE;
-        int end_idx = end/PAGE_SIZE;
-        for(int j = start_idx; j <= end_idx; ++j){
-            buddy_block* target_blk = get_block_by_page_idx_and_order(j, 0);
-            void* add = reserve_startup_allocations(PAGE_SIZE, target_blk);
-            if(DEBUG){
-                uart_puts("reserved return: ");
-                uart_put_hex((uintptr_t)add);NL;
-            }
+        if (reserve_range(range.start, range.end) != 0) {
+            uart_puts("[buddy_init] failed to reserve a startup range\n");
         }
-
     }
 
     if(DEMO){
@@ -127,13 +132,13 @@ void buddy_init() {
 }
 
 void *buddy_malloc(unsigned int size, int chunk) {
-    if (size == 0 || size > (PAGE_SIZE << (MAX_ORDER - 1))) {
+    if (buddy == NULL || size == 0 || size > BUDDY_ROOT_SIZE) {
         if(DEMO)uart_puts("Error: Size out of range\n");
         return NULL;
     }
 
     int target_order = 0;
-    unsigned int total_size = PAGE_SIZE;
+    uintptr_t total_size = PAGE_SIZE;
     while (total_size < size) {
         total_size <<= 1;
         target_order++;
@@ -169,23 +174,42 @@ void *buddy_malloc(unsigned int size, int chunk) {
     
     
     buddy_block *blk = pop_from_freelist(order);
-    blk->status = BLOCK;
+    if (blk == NULL) {
+        return NULL;
+    }
+
     set_entry_valid(blk, USED);
-    
+
     while (order > target_order) {
         order--;
-        
-        int buddy_blk_idx = find_buddy_index(blk->idx, order);
-       
-        buddy_block* buddy_blk = get_block_by_page_idx_and_order(buddy_blk_idx, order);
-        
-        int blk_idx = find_buddy_index(buddy_blk->idx, order);
-        blk = get_block_by_page_idx_and_order(blk_idx, order);
-        
-        buddy_blk->status = BLOCK;
-        buddy_blk->prev = buddy_blk->next = NULL;
 
-        if(get_entry_valid(buddy_blk) != USED) push_to_freelist(order, buddy_blk);
+        buddy_block *left = get_block_by_page_idx_and_order(blk->idx, order);
+        buddy_block *right = get_block_by_page_idx_and_order(
+            blk->idx + (1 << order), order);
+        if (left == NULL || right == NULL) {
+            return NULL;
+        }
+
+        /* The old block is now an internal node; allocate its left child. */
+        blk->status = BLOCK_SPLIT;
+        set_entry_valid(blk, USED);
+        blk->prev = NULL;
+        blk->next = NULL;
+        blk->in_free_list = 0;
+
+        left->status = BLOCK;
+        left->prev = NULL;
+        left->next = NULL;
+        left->in_free_list = 0;
+        set_entry_valid(left, USED);
+
+        right->status = BLOCK;
+        right->prev = NULL;
+        right->next = NULL;
+        right->in_free_list = 0;
+        set_entry_valid(right, UNUSED);
+        push_to_freelist(order, right);
+        blk = left;
         
         if(DEBUG){
             uart_puts("[malloc] Split block →\n");
@@ -198,22 +222,19 @@ void *buddy_malloc(unsigned int size, int chunk) {
             uart_puts(", order = ");
             uart_putint(order);
             uart_puts(", buddy block status = ");
-            uart_puts(block_state_to_str(buddy_blk->status));
+            uart_puts(block_state_to_str(right->status));
             uart_puts("\n");
             uart_puts("  Right: addr = ");
-            uart_put_hex((uintptr_t)buddy_blk->addr);
+            uart_put_hex((uintptr_t)right->addr);
             uart_puts(", idx = ");
-            uart_putint(buddy_blk->idx);
+            uart_putint(right->idx);
             uart_puts(", size = ");
-            uart_putint(buddy_blk->size);
+            uart_putint(right->size);
             uart_puts(", order = ");
             uart_putint(order);
             NL;
         }
 
-        blk->status = BLOCK;
-        set_entry_valid(blk, USED);
-        
     }
     if(chunk){
         blk->status = BLOCK_CHUNK;
@@ -246,81 +267,120 @@ void *buddy_malloc(unsigned int size, int chunk) {
 }
 
 void *reserve_startup_allocations(unsigned int size, buddy_block* target_blk) {
-    if (size == 0 || size > (PAGE_SIZE << (MAX_ORDER - 1))) {
+    if (buddy == NULL || target_blk == NULL || size < PAGE_SIZE ||
+        size > BUDDY_ROOT_SIZE) {
         uart_puts("Error: Size out of range\n");
         return NULL;
     }
-    if(get_entry_valid(target_blk) == USED){
-        uart_puts("Error: addr already be used\n");
+
+    uintptr_t requested_size = size;
+    if ((requested_size & (PAGE_SIZE - 1)) != 0 ||
+        (requested_size & (requested_size - 1)) != 0) {
+        uart_puts("Error: Reserved size must be a page-aligned power of two\n");
         return NULL;
     }
 
     int target_order = 0;
+    uintptr_t block_size = PAGE_SIZE;
+    while (block_size < requested_size) {
+        block_size <<= 1;
+        target_order++;
+    }
+
+    int target_page_idx = target_blk->idx;
+    if (target_page_idx < 0 || target_page_idx >= (int)BUDDY_PAGE_COUNT ||
+        (target_page_idx & ((1 << target_order) - 1)) != 0 ||
+        target_blk->size != PAGE_SIZE) {
+        uart_puts("Error: Invalid startup allocation target\n");
+        return NULL;
+    }
+
+    if (get_entry_valid(target_blk) == USED &&
+        target_blk->status != BLOCK_SPLIT) {
+        uart_puts("Error: addr already be used\n");
+        return NULL;
+    }
+
     if(DEBUG){
-        uart_puts("[malloc] Requested size = ");
+        uart_puts("[reserve] Requested size = ");
         uart_putint(size);
         uart_puts(", target order = ");
         uart_putint(target_order);
         uart_puts("\n");
     }
-    buddy_block* start_block;
-    int order = 0;
-    {
-        buddy_block* blk = target_blk;
-        start_block = blk;
-        while (order < MAX_ORDER ){//&& buddy->free_list[order] == NULL
-            buddy_block* buddy_blk = get_block_by_page_idx_and_order(find_buddy_index(blk->idx, order), order);
-            if(order != MAX_ORDER -1 && buddy_blk->status != BLOCK_RESERVED){
-                blk = get_parent_block(blk);
-                start_block = blk;
-                order++;
-            }else{
-                
-                break;
-            }
+
+    /* Find the smallest free-list block that contains the target block. */
+    int order = -1;
+    buddy_block *blk = NULL;
+    for (int candidate_order = MAX_ORDER - 1;
+         candidate_order >= target_order; --candidate_order) {
+        buddy_block *candidate = get_block_by_page_idx_and_order(
+            target_page_idx, candidate_order);
+        if (candidate != NULL && candidate->status == BLOCK &&
+            get_entry_valid(candidate) == UNUSED &&
+            candidate->in_free_list) {
+            order = candidate_order;
+            blk = candidate;
+            break;
         }
     }
-        
 
-    if (order < 0) {
-        uart_puts("No available block\n");
+    if (blk == NULL || order < target_order) {
+        uart_puts("No available block for startup reservation\n");
         return NULL;
     }
+    remove_from_freelist(order, blk);
+    if (blk->in_free_list) {
+        uart_puts("No available block for startup reservation\n");
+        return NULL;
+    }
+
     if(DEBUG){
-        uart_puts("[malloc] Using block from order = ");
+        uart_puts("[reserve] Using block from order = ");
         uart_putint(order);
         uart_puts("\n");
     }
-    
-    
-    buddy_block *blk = choose_from_freelist(order, start_block);
-    blk->status = BLOCK_RESERVED;
+
     set_entry_valid(blk, USED);
-    // buddy->alloc_table[blk->idd].valid = USED;
-    
-    int base = blk->idx;
+    blk->status = (order == target_order) ? BLOCK_RESERVED : BLOCK_SPLIT;
+    blk->prev = NULL;
+    blk->next = NULL;
+    blk->in_free_list = 0;
+
     while (order > target_order) {
         order--;
-        // int half_size = blk->size / 2; //order = 1
-        int buddy_blk_idx;
-        buddy_block* buddy_blk;
-        if(target_blk->idx - base >= (1<<order)){
-            buddy_blk = get_block_by_page_idx_and_order(blk->idx, order);
-            buddy_blk_idx = find_buddy_index(blk->idx, order);
-            blk = get_block_by_page_idx_and_order(buddy_blk_idx, order);
-            base += (1 << order);
+
+        buddy_block *left = get_block_by_page_idx_and_order(blk->idx, order);
+        buddy_block *right = get_block_by_page_idx_and_order(
+            blk->idx + (1 << order), order);
+        if (left == NULL || right == NULL) {
+            uart_puts("Error: Could not split startup reservation\n");
+            return NULL;
         }
-        else{
-            buddy_blk_idx = find_buddy_index(blk->idx, order);
-            buddy_blk = get_block_by_page_idx_and_order(buddy_blk_idx, order);
-            blk = get_block_by_page_idx_and_order(blk->idx, order);
-            blk->status = BLOCK_RESERVED;
-        }
-        
-       
-        
-        buddy_blk->prev = buddy_blk->next = NULL;
-        if(buddy_blk->status == BLOCK) push_to_freelist(order, buddy_blk);
+
+        int target_in_right = target_page_idx >= right->idx;
+        buddy_block *chosen = target_in_right ? right : left;
+        buddy_block *sibling = target_in_right ? left : right;
+
+        blk->status = BLOCK_SPLIT;
+        set_entry_valid(blk, USED);
+        blk->prev = NULL;
+        blk->next = NULL;
+        blk->in_free_list = 0;
+
+        sibling->status = BLOCK;
+        sibling->prev = NULL;
+        sibling->next = NULL;
+        sibling->in_free_list = 0;
+        set_entry_valid(sibling, UNUSED);
+        push_to_freelist(order, sibling);
+
+        chosen->prev = NULL;
+        chosen->next = NULL;
+        chosen->in_free_list = 0;
+        set_entry_valid(chosen, USED);
+        chosen->status = (order == target_order) ? BLOCK_RESERVED : BLOCK_SPLIT;
+        blk = chosen;
         
         if(DEBUG){
             uart_puts("[malloc] Split block →\n");
@@ -333,24 +393,20 @@ void *reserve_startup_allocations(unsigned int size, buddy_block* target_blk) {
             uart_puts(", order = ");
             uart_putint(order);
             uart_puts(", buddy block status = ");
-            uart_puts(block_state_to_str(buddy_blk->status));
+            uart_puts(block_state_to_str(sibling->status));
             uart_puts("\n");
             uart_puts("  buddy: addr = ");
-            uart_put_hex((uintptr_t)buddy_blk->addr);
+            uart_put_hex((uintptr_t)sibling->addr);
             uart_puts(", idx = ");
-            uart_putint(buddy_blk->idx);
+            uart_putint(sibling->idx);
             uart_puts(", size = ");
-            uart_putint(buddy_blk->size);
+            uart_putint(sibling->size);
             uart_puts(", order = ");
             uart_putint(order);
             uart_puts("\n");
         }
 
-        blk->status = BLOCK_RESERVED;
-        set_entry_valid(blk, USED);
-        
     }
-    
     
     blk->status = BLOCK_RESERVED;
     set_entry_valid(blk, USED);
@@ -364,20 +420,45 @@ void* test(int idx){
 }
 
 void buddy_free(void *addr) {
-    
+    if (addr == NULL) {
+        return;
+    }
+
     buddy_block *block = lookup_alloc(addr);
-    
-    if (!block) {
+    if (block == NULL) {
         uart_puts("[free] ERROR: Unknown addr, cannot free\n");
         return;
     }
-    int order = __builtin_ctz(block->size / PAGE_SIZE); // log
-    if(block->addr != addr){
-        uart_puts("Undefined behavior!");NL;
+
+    if (block->addr != addr) {
+        uart_puts("[free] ERROR: Address is not an allocation base\n");
         return;
     }
-    if(block->status != BLOCK_RESERVED) set_entry_valid(block, UNUSED);
-    // buddy->alloc_table[block->idd].valid = UNUSED;
+
+    if (block->status == BLOCK_RESERVED) {
+        uart_puts("[free] ERROR: Cannot free reserved memory\n");
+        return;
+    }
+    if (block->status != BLOCK && block->status != BLOCK_CHUNK) {
+        uart_puts("[free] ERROR: Address is not a directly allocated block\n");
+        return;
+    }
+
+    int order = 0;
+    unsigned int block_pages = block->size / PAGE_SIZE;
+    while ((1U << order) < block_pages && order < MAX_ORDER) {
+        order++;
+    }
+    if (order >= MAX_ORDER || (1U << order) != block_pages) {
+        uart_puts("[free] ERROR: Invalid block metadata\n");
+        return;
+    }
+
+    set_entry_valid(block, UNUSED);
+    block->status = BLOCK;
+    block->prev = NULL;
+    block->next = NULL;
+    block->in_free_list = 0;
 
     if(DEBUG){
         uart_puts("[free] Start: addr = ");
@@ -389,22 +470,22 @@ void buddy_free(void *addr) {
         uart_puts("\n");
     }
 
-    block->status = BLOCK;
     while (order < MAX_ORDER - 1) {
         int buddy_idx = find_buddy_index(block->idx, order);
         buddy_block *buddy_blk = get_block_by_page_idx_and_order(buddy_idx, order);
 
-        if (!buddy_blk || (get_entry_valid(buddy_blk) == USED)) {
-            // push_to_freelist(order, block);
+        if (buddy_blk == NULL || buddy_blk->status != BLOCK ||
+            get_entry_valid(buddy_blk) != UNUSED ||
+            !buddy_blk->in_free_list) {
             if(DEBUG){
                 uart_puts("[free] Cannot merge with buddy idx = ");
                 uart_putint(buddy_idx);
                 uart_puts(" at order ");
                 uart_putint(order);
                 uart_puts(", buddy_blk status: ");
-                uart_puts(block_state_to_str(buddy_blk->status));
+                uart_puts(buddy_blk ? block_state_to_str(buddy_blk->status) : "NULL");
                 uart_puts(", buddy_blk valid: ");
-                uart_puts(block_valid_to_str(get_entry_valid(buddy_blk)));
+                uart_puts(buddy_blk ? block_valid_to_str(get_entry_valid(buddy_blk)) : "NULL");
                 uart_puts("\n");
             }
             break;
@@ -421,23 +502,19 @@ void buddy_free(void *addr) {
             NL;
         }
         
-        // 自己和buddy都沒有用到就會到這
-        buddy_block* parent_blk = get_parent_block(buddy_blk);
-        buddy_blk->in_free_list = 0;
-        block->in_free_list = 0;
-        
-        parent_blk->status = BLOCK;
-        // parent_blk->in_free_list = 1;
-        set_entry_valid(parent_blk, UNUSED);
-        block = parent_blk;
-        if (buddy_blk->prev) buddy_blk->prev->next = buddy_blk->next;
-        if (buddy_blk->next) buddy_blk->next->prev = buddy_blk->prev;
-        if (buddy->free_list[order] == buddy_blk){
-            buddy->free_list[order] = buddy_blk->next;
-            
+        buddy_block* parent_blk = get_parent_block(block);
+        if (parent_blk == NULL) {
+            break;
         }
-            
 
+        remove_from_freelist(order, buddy_blk);
+
+        parent_blk->status = BLOCK;
+        set_entry_valid(parent_blk, UNUSED);
+        parent_blk->prev = NULL;
+        parent_blk->next = NULL;
+        parent_blk->in_free_list = 0;
+        block = parent_blk;
         order++;
     }
 
@@ -459,14 +536,18 @@ void buddy_free(void *addr) {
 }
 
 void* kmalloc(size_t size) {
-    disable_interrupts();
+    if (size == 0) {
+        return NULL;
+    }
+
+    irq_state_t state = irq_save();
     int index = find_pool_index(size);
-    memory_pool_t *pool;
+    memory_pool_t *pool = NULL;
     if (index == -1) {
         if(DEMO)
         uart_puts("[kmalloc] Size too large, use buddy\n");
         void* addr =  buddy_malloc(size, 0);
-        enable_interrupts();
+        irq_restore(state);
         return addr; // fallback
     }else {
         while(index < NUM_POOLS){
@@ -480,8 +561,9 @@ void* kmalloc(size_t size) {
         }
         if(index >= NUM_POOLS){ // chunk 用完了
             uart_puts("[kmalloc] Chunck used up, use buddy.\n");
-            enable_interrupts();
-            return buddy_malloc(size, 0);
+            void *addr = buddy_malloc(size, 0);
+            irq_restore(state);
+            return addr;
         }
         if(DEMO){
             uart_puts("[kmalloc] Using memory pool index: ");
@@ -495,32 +577,49 @@ void* kmalloc(size_t size) {
 
     int first_allocate_new_chunk = 0;
     if (!pool->free_list) {
-        
         debug++;
-        
+
         void* page_add = allocate_new_chunk_page(pool);
-       
-        
         if(page_add == NULL){
-            enable_interrupts();
+            irq_restore(state);
             return NULL;
-        } 
-            
+        }
         first_allocate_new_chunk = 1;
     }
+
     chunk_t *chunk = pool->free_list;
-    
+    if (chunk == NULL) {
+        irq_restore(state);
+        return NULL;
+    }
+
     pool->free_list = chunk->next;
-    chunk_page_t* pg = pool->pages;
+    chunk->next = NULL;
     uintptr_t page_base = (uintptr_t)chunk & ~(PAGE_SIZE - 1);
-    if(!first_allocate_new_chunk){
-        while(pg){
+    if (!first_allocate_new_chunk) {
+        chunk_page_t *pg = pool->pages;
+        int found_page = 0;
+        while (pg) {
             if((uintptr_t)pg->page_addr == page_base){
+                if (pg->free_chunks <= 0) {
+                    uart_puts("[kmalloc] Invalid chunk page accounting\n");
+                    chunk->next = pool->free_list;
+                    pool->free_list = chunk;
+                    irq_restore(state);
+                    return NULL;
+                }
                 pg->free_chunks--;
+                found_page = 1;
                 break;
             }
-            
             pg = pg->next;
+        }
+        if (!found_page) {
+            uart_puts("[kmalloc] Cannot find chunk page metadata\n");
+            chunk->next = pool->free_list;
+            pool->free_list = chunk;
+            irq_restore(state);
+            return NULL;
         }
         if(DEMO) print_free_list();
     }
@@ -529,95 +628,96 @@ void* kmalloc(size_t size) {
         print_pool_state();
         
     }
-    enable_interrupts();
+    irq_restore(state);
     return (void *)chunk;
 }
 
 void kfree(void *ptr) {
-    disable_interrupts();
+    irq_state_t state = irq_save();
+
+    if (ptr == NULL) {
+        irq_restore(state);
+        return;
+    }
+
     uintptr_t addr = (uintptr_t)ptr;
     uintptr_t page_base = addr & ~(PAGE_SIZE - 1);
-    
+
     if(DEMO){
         uart_puts("[kfree] ptr = ");
         uart_put_hex(addr); NL;
         uart_puts("[kfree] page base = ");
         uart_put_hex(page_base); NL;
     }
-    
-
     buddy_block* block = lookup_alloc(ptr);
-    if(block->status == BLOCK_RESERVED){
-        if(DEMO)uart_puts("[kfree] Reserved memory! command cancel\n");
-        enable_interrupts();
-        return;
-    }
-    if (!block) {
+    if (block == NULL) {
         uart_puts("[kfree] block not found in alloc_table\n");
-        enable_interrupts();
+        irq_restore(state);
         return;
     }
 
-    if (!block || block->status != BLOCK_CHUNK) {
-        if(be_used((void*)page_base)){
-            if(DEMO)uart_puts("Memory has not been allocated!\n");
-            enable_interrupts();
-            return;
-        }
+    if (block->status == BLOCK_RESERVED) {
+        if(DEMO)uart_puts("[kfree] Reserved memory! command cancel\n");
+        irq_restore(state);
+        return;
+    }
+
+    if (block->status != BLOCK_CHUNK) {
         if(DEMO)uart_puts("[kfree] → Not a chunk, calling buddy_free\n");
         buddy_free(ptr);
         if(DEMO) print_free_list();
-        enable_interrupts();
+        irq_restore(state);
         return;
     }
     
     if(DEMO)uart_puts("[kfree] → This is a CHUNK\n");
 
-    memory_pool_t* pool;
-    chunk_page_t* pg;
+    memory_pool_t *pool = NULL;
+    chunk_page_t *pg = NULL;
+    chunk_page_t *prev_pg = NULL;
     int found = 0;
-    for(int i = 0; i < NUM_POOLS; i++){
+    for (int i = 0; i < NUM_POOLS; i++) {
         pool = &mem_pools[i];
-        for(chunk_page_t* tmp_pg = pool->pages; tmp_pg!=NULL; tmp_pg = tmp_pg->next){
+        prev_pg = NULL;
+        for (chunk_page_t *tmp_pg = pool->pages;
+             tmp_pg != NULL; tmp_pg = tmp_pg->next) {
             if((uintptr_t)tmp_pg->page_addr == page_base){
                 pg = tmp_pg;
                 found = 1;
                 break;
             }
+            prev_pg = tmp_pg;
         }
-        
-        // for(int j = 0; j < MAX_PAGE_NUM_FOR_CHUNK; j++){
-        //     pg = pool->pages + j;
-        //     if(pool->chunk_size == 2048){
-        //         uart_puts("free_pg_start: ");
-        //         uart_put_hex(pg);NL;
-        //         uart_put_hex(pg->page_addr);NL;
-        //     }
-            
-        //     if((uintptr_t)pg->page_addr == page_base){
-        //         found = 1;
-        //         break;
-        //     }
-        // }
-        if(found) break;
+        if (found) {
+            break;
+        }
     }
-    if(in_chunk_freelist(pool, ptr)){
+
+    if (!found || pool == NULL || pg == NULL) {
+        uart_puts("[kfree] cannot find chunk_page for addr\n");
+        irq_restore(state);
+        return;
+    }
+
+    uintptr_t offset = addr - page_base;
+    if (offset >= PAGE_SIZE || pool->chunk_size == 0 ||
+        (offset % pool->chunk_size) != 0 ||
+        offset + pool->chunk_size > PAGE_SIZE ||
+        offset / pool->chunk_size >= (uintptr_t)pg->total_chunks) {
+        uart_puts("[kfree] address is not a valid chunk boundary\n");
+        irq_restore(state);
+        return;
+    }
+
+    if (pg->free_chunks >= pg->total_chunks || in_chunk_freelist(pool, ptr)) {
         uart_puts("[kfree] The chunk has not been allocated.\n");
-        enable_interrupts();
+        irq_restore(state);
         return;
     }
     if(DEMO){
         uart_puts("[kfree] matched chunk size: ");
         uart_putint(pool->chunk_size); NL;
         uart_putint(found);NL;
-    }
-
-    chunk_page_t* prev = NULL;
-    
-
-    if (!found) {
-        uart_puts("[kfree] cannot find chunk_page for addr\n");
-        // break;
     }
 
     if(DEBUG || DEMO){
@@ -631,7 +731,6 @@ void kfree(void *ptr) {
     }
     
 
-    // 回收 chunk
     chunk_t *chunk = (chunk_t *)ptr;
     chunk->next = pool->free_list;
     pool->free_list = chunk;
@@ -639,21 +738,20 @@ void kfree(void *ptr) {
     if(DEBUG)
     uart_puts("[kfree] chunk returned to pool\n");
 
-    int chunk_free = 0; 
+    int chunk_free = 0;
     if (pg->free_chunks == pg->total_chunks) {
         if(DEBUG||DEMO)
         uart_puts("[kfree] All chunks freed, releasing page\n");
-        pool->num_page--;
 
-
-        void* start = pg->page_addr;
-        void* end = (void *)((char *)pg->page_addr + PAGE_SIZE);
+        uintptr_t start = (uintptr_t)pg->page_addr;
+        uintptr_t end = start + PAGE_SIZE;
 
         chunk_t* new_list = NULL;
         chunk_t* cur = pool->free_list;
         while (cur) {
             chunk_t* next = cur->next;
-            if ((void *)cur < start || (void *)cur >= end) {
+            uintptr_t cur_addr = (uintptr_t)cur;
+            if (cur_addr < start || cur_addr >= end) {
                 cur->next = new_list;
                 new_list = cur;
             }
@@ -661,11 +759,20 @@ void kfree(void *ptr) {
         }
         pool->free_list = new_list;
 
-
-        if (prev) prev->next = pg->next;
-        else pool->pages = pg->next;
-        
-        buddy_free(pg->page_addr);
+        void *released_page = pg->page_addr;
+        if (prev_pg != NULL) {
+            prev_pg->next = pg->next;
+        } else {
+            pool->pages = pg->next;
+        }
+        pg->page_addr = NULL;
+        pg->total_chunks = 0;
+        pg->free_chunks = 0;
+        pg->next = NULL;
+        if (pool->num_page > 0) {
+            pool->num_page--;
+        }
+        buddy_free(released_page);
         chunk_free = 1;
     }
     
@@ -677,13 +784,15 @@ void kfree(void *ptr) {
         print_free_list();
         
     } 
-    enable_interrupts();
+    irq_restore(state);
     return;
 }
 
 // =================================== startup ===================================
 void startup_allocator_init() {
     current = (uintptr_t)BUDDY_METADATA_ADDR;
+    reserved_count = 0;
+    buddy_block_cursor = 0;
 
     // 1. 配 buddy_system 本體
     buddy = (buddy_system *)current;
@@ -712,15 +821,17 @@ void startup_allocator_init() {
         for (int local_idx = 0; local_idx < (1 << (MAX_ORDER - order - 1)); ++local_idx) {
             int i = (1 << (MAX_ORDER - order - 1)) - 1 + local_idx;
             
-            int block_size = (1 << order) * PAGE_SIZE;
+            uintptr_t block_size = PAGE_SIZE << order;
             // 1. addr
-            buddy->alloc_table[i].addr = (void *)((uintptr_t)(local_idx * block_size));
+            buddy->alloc_table[i].addr = (void *)
+                ((uintptr_t)local_idx * block_size);
 
             // 2. block
             buddy->alloc_table[i].block = block_metadata_cursor;
             buddy->alloc_table[i].block->idx = local_idx * (1 << order);
             buddy->alloc_table[i].block->status = BLOCK;
-            buddy->alloc_table[i].block->addr = (void *)((uintptr_t)(local_idx * block_size));
+            buddy->alloc_table[i].block->addr = (void *)
+                ((uintptr_t)local_idx * block_size);
             buddy->alloc_table[i].block->size = block_size;
             buddy->alloc_table[i].block->prev = NULL;
             buddy->alloc_table[i].block->next = NULL;
@@ -748,32 +859,167 @@ void startup_allocator_init() {
         mem_pools[i].chunk_size = pool_sizes[i];
         mem_pools[i].free_list = NULL;
         mem_pools[i].num_page = 0;
-        mem_pools[i].pages = chunk_metadata_cursor + i * MAX_PAGE_NUM_FOR_CHUNK;
+        chunk_page_t *metadata_base = chunk_metadata_cursor +
+            i * MAX_PAGE_NUM_FOR_CHUNK;
+        mem_pools[i].pages = NULL;
+        for (int j = 0; j < MAX_PAGE_NUM_FOR_CHUNK; j++) {
+            chunk_page_t *page = &metadata_base[j];
+            page->page_addr = NULL;
+            page->total_chunks = 0;
+            page->free_chunks = 0;
+            page->next = NULL;
+        }
     }
 
-    // memory_reserve((void*)0x00000000, (void*)0x00001);
+    /* Every byte outside the Lab 4 usable range is unavailable. */
+    memory_reserve((void*)BUDDY_END, (void*)BUDDY_ROOT_END);
     memory_reserve((void*)BUDDY_METADATA_ADDR, (void*)current);
     memory_reserve((void*)0x0000, (void*)0x1000);   // Spin tables
     memory_reserve((void*)_start,(void*) _end);     // Kernel image
-    memory_reserve((void*)dtb_addr, (void*)dtb_addr + 60000); // Devicetree
-    memory_reserve((void*)RAMDISK_BASE, (void*)RAMDISK_BASE + 30000); //Initramfs
+
+    uintptr_t dtb_start = dtb_addr;
+    uintptr_t dtb_end = dtb_start;
+    if (dtb_start != 0 && dtb_start >= BUDDY_START &&
+        dtb_start <= BUDDY_ROOT_END - sizeof(struct fdt_header)) {
+        struct fdt_header *hdr = (struct fdt_header *)dtb_start;
+        if (be32_to_cpu(&hdr->magic) == FDT_MAGIC) {
+            uint32_t dtb_size = be32_to_cpu(&hdr->totalsize);
+            if (dtb_size > 0 && dtb_size <= BUDDY_ROOT_END - dtb_start) {
+                dtb_end = dtb_start + dtb_size;
+            }
+        }
+    }
+    if (dtb_end > dtb_start) {
+        memory_reserve((void*)dtb_start, (void*)dtb_end);
+    }
+
+    uintptr_t ramdisk_start = (uintptr_t)RAMDISK_BASE;
+    uintptr_t ramdisk_end = (uintptr_t)RAMDISK_END;
+    if (ramdisk_end > ramdisk_start) {
+        memory_reserve((void*)ramdisk_start, (void*)ramdisk_end);
+    }
     buddy_init();
 
 }
 
 
 void memory_reserve(void *start, void* end) {
-    if (reserved_count < MAX_RESERVED) {
-        reserved_ranges[reserved_count].start = (uintptr_t)start;
-        reserved_ranges[reserved_count].end = (uintptr_t)end;
-        reserved_count++;
-    }else{
-        uart_puts("[memory_reserve] Out of memeory\n");
+    uintptr_t range_start = (uintptr_t)start;
+    uintptr_t range_end = (uintptr_t)end;
+
+    if (range_start < BUDDY_START) {
+        range_start = BUDDY_START;
     }
-    uart_puts("\n\nreserve start address: ");
-    uart_put_hex((uintptr_t)start);NL;
-	uart_puts("reserve end address: ");
-    uart_put_hex((uintptr_t)end);NL;
+    if (range_end > BUDDY_ROOT_END) {
+        range_end = BUDDY_ROOT_END;
+    }
+    range_start = align_down(range_start, PAGE_SIZE);
+    range_end = align_up(range_end, PAGE_SIZE);
+    if (range_end > BUDDY_ROOT_END) {
+        range_end = BUDDY_ROOT_END;
+    }
+    if (range_start >= range_end) {
+        return;
+    }
+
+    /* Keep ranges sorted and coalesce overlaps/adjacent ranges. */
+    int first = 0;
+    while (first < reserved_count &&
+           reserved_ranges[first].end < range_start) {
+        first++;
+    }
+
+    int last = first;
+    while (last < reserved_count &&
+           reserved_ranges[last].start <= range_end) {
+        if (reserved_ranges[last].start < range_start) {
+            range_start = reserved_ranges[last].start;
+        }
+        if (reserved_ranges[last].end > range_end) {
+            range_end = reserved_ranges[last].end;
+        }
+        last++;
+    }
+
+    if (first == last) {
+        if (reserved_count >= MAX_RESERVED) {
+            uart_puts("[memory_reserve] Too many reserved ranges\n");
+            return;
+        }
+        for (int i = reserved_count; i > first; --i) {
+            reserved_ranges[i] = reserved_ranges[i - 1];
+        }
+        reserved_count++;
+    } else {
+        for (int i = last; i < reserved_count; ++i) {
+            reserved_ranges[first + 1 + i - last] = reserved_ranges[i];
+        }
+        reserved_count -= last - first - 1;
+    }
+
+    reserved_ranges[first].start = range_start;
+    reserved_ranges[first].end = range_end;
+
+    if(DEMO){
+        uart_puts("\n\nreserve start address: ");
+        uart_put_hex(range_start);NL;
+        uart_puts("reserve end address: ");
+        uart_put_hex(range_end);NL;
+    }
+    
+}
+
+/* Reserve a half-open address range using the largest aligned buddy blocks. */
+static int reserve_range(uintptr_t start, uintptr_t end) {
+    if (start >= end) {
+        return 0;
+    }
+
+    if (start < BUDDY_START) {
+        start = BUDDY_START;
+    }
+    if (end > BUDDY_ROOT_END) {
+        end = BUDDY_ROOT_END;
+    }
+    if (start >= end) {
+        return 0;
+    }
+
+    start = align_down(start, PAGE_SIZE);
+    end = align_up(end, PAGE_SIZE);
+    if (end > BUDDY_ROOT_END) {
+        end = BUDDY_ROOT_END;
+    }
+
+    uintptr_t cursor = start;
+    while (cursor < end) {
+        int order = MAX_ORDER - 1;
+        while (order > 0) {
+            uintptr_t block_size = PAGE_SIZE << order;
+            if ((cursor & (block_size - 1)) == 0 &&
+                block_size <= end - cursor) {
+                break;
+            }
+            order--;
+        }
+
+        uintptr_t block_size = PAGE_SIZE << order;
+        buddy_block *target = get_block_by_page_idx_and_order(
+            (int)(cursor / PAGE_SIZE), 0);
+        if (target != NULL) {
+            (void)reserve_startup_allocations((unsigned int)block_size, target);
+        }
+        buddy_block *reserved_block = get_block_by_page_idx_and_order(
+            (int)(cursor / PAGE_SIZE), order);
+        if (target == NULL || reserved_block == NULL ||
+            reserved_block->status != BLOCK_RESERVED ||
+            get_entry_valid(reserved_block) != USED) {
+            uart_puts("[buddy_init] unable to reserve range block\n");
+            return -1;
+        }
+        cursor += block_size;
+    }
+    return 0;
 }
 
 // =================================== tool ===================================
@@ -808,6 +1054,11 @@ int find_buddy_index(int index, int order) {
 }
 
 void push_to_freelist(int order, buddy_block *blk) {
+    if (buddy == NULL || blk == NULL || order < 0 || order >= MAX_ORDER ||
+        blk->in_free_list) {
+        return;
+    }
+
     blk->next = buddy->free_list[order];
     if (buddy->free_list[order]) {
         buddy->free_list[order]->prev = blk;
@@ -815,42 +1066,55 @@ void push_to_freelist(int order, buddy_block *blk) {
     blk->prev = NULL;
     buddy->free_list[order] = blk;
 
-    blk->status = BLOCK;  // 可用的 block，存的是 order
+    blk->status = BLOCK;
+    set_entry_valid(blk, UNUSED);
     blk->in_free_list = 1;
 }
 
-buddy_block *pop_from_freelist(int order) {
-    buddy_block *blk = buddy->free_list[order];
-    
-    if (!blk) return NULL;
+void remove_from_freelist(int order, buddy_block *blk) {
+    if (buddy == NULL || blk == NULL || order < 0 || order >= MAX_ORDER ||
+        !blk->in_free_list) {
+        return;
+    }
 
-    buddy->free_list[order] = blk->next;
-    if (blk->next) blk->next->prev = NULL;
+    if (blk->prev != NULL) {
+        blk->prev->next = blk->next;
+    } else if (buddy->free_list[order] == blk) {
+        buddy->free_list[order] = blk->next;
+    } else {
+        return;
+    }
 
-    blk->next = blk->prev = NULL;
+    if (blk->next != NULL) {
+        blk->next->prev = blk->prev;
+    }
+    blk->prev = NULL;
+    blk->next = NULL;
     blk->in_free_list = 0;
+}
+
+buddy_block *pop_from_freelist(int order) {
+    if (buddy == NULL || order < 0 || order >= MAX_ORDER) {
+        return NULL;
+    }
+
+    buddy_block *blk = buddy->free_list[order];
+    if (blk == NULL) {
+        return NULL;
+    }
+    remove_from_freelist(order, blk);
     return blk;
 }
 
 buddy_block *choose_from_freelist(int order, buddy_block* target_blk) {
-    buddy_block *blk = buddy->free_list[order];
-    if (!blk) return NULL;
+    if (buddy == NULL || target_blk == NULL || order < 0 || order >= MAX_ORDER) {
+        return NULL;
+    }
 
     for(buddy_block* b = buddy->free_list[order]; b!=NULL; b = b->next){
         if(b->idd == target_blk->idd){
-            b->in_free_list = 0;
-            if(b->prev){
-                b->prev->next = b->next;
-                if(b->next) b->next->prev = b->prev;
-                b->next = b->prev = NULL;
-                return b;
-            }else{
-                buddy->free_list[order] = b->next;
-                if(b->next) b->next->prev = NULL;
-                b->next = b->prev = NULL;
-                return b;
-            }
-            
+            remove_from_freelist(order, b);
+            return b;
         }
     }
 
@@ -858,16 +1122,30 @@ buddy_block *choose_from_freelist(int order, buddy_block* target_blk) {
 }
 
 buddy_block* lookup_alloc(void* addr) {
-    for(int order = 0; order < MAX_ORDER; order++){
-        int block_size = (1 << order) * PAGE_SIZE;
-        int local_block_index = (int)(uintptr_t)addr/block_size;
-        // uart_puts("local: ");
-        // uart_putint(local_block_index);
-        // NL;
-        int global_block_index = (1<<(MAX_ORDER-order-1))-1 + local_block_index;
-        
-        if(buddy->alloc_table[global_block_index].valid == USED){
-            return buddy->alloc_table[global_block_index].block;
+    if (buddy == NULL || addr == NULL) {
+        return NULL;
+    }
+
+    uintptr_t address = (uintptr_t)addr;
+    if (address < BUDDY_START || address >= BUDDY_ROOT_END) {
+        return NULL;
+    }
+
+    for (int order = 0; order < MAX_ORDER; order++) {
+        uintptr_t block_size = PAGE_SIZE << order;
+        int local_block_index = (int)((address - BUDDY_START) / block_size);
+        int block_count = 1 << (MAX_ORDER - order - 1);
+        if (local_block_index < 0 || local_block_index >= block_count) {
+            continue;
+        }
+
+        int global_block_index = block_count - 1 + local_block_index;
+        allocation_entry *entry = &buddy->alloc_table[global_block_index];
+        if (entry->valid == USED && entry->block != NULL &&
+            entry->block->status != BLOCK_SPLIT &&
+            address >= (uintptr_t)entry->block->addr &&
+            address < (uintptr_t)entry->block->addr + entry->block->size) {
+            return entry->block;
         }
     }
     return NULL;
@@ -930,7 +1208,31 @@ int find_pool_index(size_t size) {
 }
 
 void* allocate_new_chunk_page(memory_pool_t *pool) {
-    
+    if (pool == NULL || pool->num_page >= MAX_PAGE_NUM_FOR_CHUNK ||
+        pool->chunk_size == 0 || PAGE_SIZE / pool->chunk_size == 0) {
+        return NULL;
+    }
+
+    int pool_index = (int)(pool - mem_pools);
+    if (pool_index < 0 || pool_index >= NUM_POOLS ||
+        chunk_metadata_cursor == NULL) {
+        return NULL;
+    }
+
+    chunk_page_t *metadata_base = chunk_metadata_cursor +
+        pool_index * MAX_PAGE_NUM_FOR_CHUNK;
+    chunk_page_t *new_pg = NULL;
+    for (int i = 0; i < MAX_PAGE_NUM_FOR_CHUNK; i++) {
+        if (metadata_base[i].page_addr == NULL) {
+            new_pg = &metadata_base[i];
+            break;
+        }
+    }
+    if (new_pg == NULL) {
+        uart_puts("[allocator] chunk metadata is full\n");
+        return NULL;
+    }
+
     void *page = buddy_malloc(PAGE_SIZE, 1);
     if(DEMO){
         uart_puts("page: ");
@@ -947,13 +1249,6 @@ void* allocate_new_chunk_page(memory_pool_t *pool) {
     }
     
 
-    // 新增 page metadata (之前已經有初始化過，設定值就好)
-    chunk_page_t* new_pg = pool->pages + (int)pool->num_page;
-    // uart_puts("metadata_addr ");
-    // uart_put_hex(new_pg);NL;
-    // uart_puts("pool->page_addr ");
-    // uart_put_hex(pool->pages);NL;
-    
     new_pg->page_addr = page;
     new_pg->total_chunks = chunk_count;
     new_pg->free_chunks = chunk_count - 1;
@@ -990,28 +1285,47 @@ void print_pool_state() {
 }
 
 buddy_block* get_block_by_page_idx_and_order(int page_idx, int order) {
-    int local_block_idx = page_idx / (1 << order); // 每個order的blcock idx (base = 0)
+    if (buddy == NULL || page_idx < 0 ||
+        page_idx >= (int)BUDDY_PAGE_COUNT || order < 0 ||
+        order >= MAX_ORDER) {
+        return NULL;
+    }
+
+    int pages_per_block = 1 << order;
+    int local_block_idx = page_idx / pages_per_block;
     int level = MAX_ORDER - order - 1;
-    return buddy->alloc_table[ (1<<level) - 1 + local_block_idx].block;
+    int block_count = 1 << level;
+    if (local_block_idx < 0 || local_block_idx >= block_count) {
+        return NULL;
+    }
+    return buddy->alloc_table[block_count - 1 + local_block_idx].block;
     
 }
 
 buddy_block* get_parent_block(buddy_block* blk){
-    if(blk->idd == 0){ // root
+    if (blk == NULL || blk->idd <= 0) { // root
         return NULL;
     }
     return buddy->alloc_table[(blk->idd-1)/2].block;
 }
 
 void set_entry_valid(buddy_block* blk, int val){
-    buddy->alloc_table[blk->idd].valid = val;
+    if (buddy != NULL && blk != NULL && blk->idd >= 0 && blk->idd < MAX_ALLOC) {
+        buddy->alloc_table[blk->idd].valid = val;
+    }
 }
 
 int get_entry_valid(buddy_block* blk){
+    if (buddy == NULL || blk == NULL || blk->idd < 0 || blk->idd >= MAX_ALLOC) {
+        return USED;
+    }
     return buddy->alloc_table[blk->idd].valid;
 }
 
 int in_chunk_freelist(memory_pool_t* m_pool, void* add){
+    if (m_pool == NULL || add == NULL) {
+        return 0;
+    }
     for(chunk_t* p = m_pool->free_list; p!= NULL; p=p->next){
         if(p == add){
             return 1;
@@ -1021,9 +1335,19 @@ int in_chunk_freelist(memory_pool_t* m_pool, void* add){
 }
 
 int be_used(void* page_addr){
-    uint32_t idx = (uint32_t)(uintptr_t)page_addr / PAGE_SIZE;
+    if (page_addr == NULL) {
+        return 0;
+    }
+    uintptr_t address = (uintptr_t)page_addr;
+    if (address < BUDDY_START || address >= BUDDY_ROOT_END) {
+        return 0;
+    }
+    uint32_t idx = (uint32_t)((address - BUDDY_START) / PAGE_SIZE);
     buddy_block* blk = get_block_by_page_idx_and_order(idx, 0);
     for(uint32_t i = 0; i < MAX_ORDER; ++i){
+        if (blk == NULL) {
+            return 0;
+        }
         if(blk->in_free_list)return 1;
         blk = get_parent_block(blk);
     }

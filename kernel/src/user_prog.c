@@ -8,101 +8,104 @@
 
 int ready_run_user = 0;
 
-extern void user_program(void);
-
 /*
-0x3c0 = 0b 0011 1100 0000
-          |||| |||| ||||
-          |||| |||| |||└─ M[3:0] = 0000 = EL0t
-          |||| |||| ||└── 0
-          |||| |||| |└─── 0
-          |||| |||| └──── 0
-          |||| |||└────── res[0] and M[4] 
-          |||| ||└─────── I = 1  <--- 關閉 IRQ
-          |||| |└──────── F = 1
-          |||| └───────── A = 1
-          |||──────────── D = 1
-*/
-void switch_to_user_mode(void *func, void* sp_addr) {
+ * Lab 5's user program reads CNTPCT_EL0/CNTFRQ_EL0 for its delay loop.
+ * EL0 access to the physical counter is controlled by CNTKCTL_EL1[0]
+ * (EL0PCTEN). Without this bit, the first user-mode counter read traps
+ * repeatedly and a framebuffer animation appears to be frozen.
+ */
+static void enable_user_counter_access(void) {
+  uint64_t cntkctl;
+  asm volatile("mrs %0, cntkctl_el1" : "=r"(cntkctl));
+  cntkctl |= 1ULL;  /* EL0PCTEN: permit EL0 to read CNTPCT_EL0 */
+  asm volatile("msr cntkctl_el1, %0" :: "r"(cntkctl) : "memory");
+  asm volatile("isb" ::: "memory");
+}
+
+void *load_user_program(const char *filename) {
+  struct cpio_file file = parse_or_find_file_in_archive(filename, 1);
+  if (file.data == NULL || file.size <= 0) {
+    uart_puts("Error: File not found in initramfs.\n");
+    return NULL;
+  }
+
+  char *user_program = (char *)kmalloc((size_t)file.size);
+  if (!user_program) {
+    uart_puts("Error: Cannot allocate user program memory.\n");
+    return NULL;
+  }
+  memcpy_(user_program, file.data, (size_t)file.size);
+
+  uart_puts("User program loaded to RAM at ");
+  uart_put_hex((uintptr_t)user_program);
+  uart_puts(" (size ");
+  uart_putint((unsigned long long)file.size);
+  uart_puts(")\n");
+  return user_program;
+}
+
+thread_t *start_user_process(const char *filename) {
+  if (cur_thread == NULL)
+    thread_init();
+
+  struct cpio_file file = parse_or_find_file_in_archive(filename, 1);
+  if (file.data == NULL || file.size <= 0) {
+    uart_puts("Error: User program not found in initramfs.\n");
+    return NULL;
+  }
+
+  // The program is a flat, position-independent image.  Keep it in a
+  // separate allocation for the lifetime of the process.
+  char *program = (char *)kmalloc((size_t)file.size);
+  char *user_stack = (char *)kmalloc(USER_STACK_SIZE);
+  if (!program || !user_stack) {
+    if (program)
+      kfree(program);
+    if (user_stack)
+      kfree(user_stack);
+    uart_puts("Error: Cannot allocate user process memory.\n");
+    return NULL;
+  }
+  memcpy_(program, file.data, (size_t)file.size);
+
+  uintptr_t user_stack_top = ((uintptr_t)user_stack + USER_STACK_SIZE) &
+                             ~(uintptr_t)0xF;
+  thread_t *process = process_create((uint64_t)(uintptr_t)program,
+                                     (uint64_t)user_stack_top);
+  if (!process) {
+    kfree(program);
+    kfree(user_stack);
+    uart_puts("Error: Cannot create user process.\n");
+    return NULL;
+  }
+
+  process->data = program;
+  process->data_size = file.size;
+  process->user_stack = user_stack;
+  process->user_stack_size = USER_STACK_SIZE;
+
+  // The user program uses polling syscalls for UART input.  Leaving the
+  // kernel shell's RX/TX IRQs enabled would enqueue shell tasks forever
+  // while the user program is running.
+  uart_disable_interrupt();
   ready_run_user = 1;
-  
   asm volatile("bl core_timer_enable");
-  enable_interrupts();
-  *(unsigned int*)CORE0_TIMER_IRQ_CTRL = 2;
+  enable_user_counter_access();
+  /* UART IRQs are intentionally off while user code uses polling; keep CPU
+   * IRQs enabled so the preemption timer can still interrupt EL0. */
+  irq_enable();
 
-  // uint64_t freq;
-  // asm volatile ("mrs %0, cntfrq_el0" : "=r" (freq));
-  // uint64_t tval = 2 * freq;
-  // asm volatile ("msr cntp_tval_el0, %0" :: "r" (tval));
-  // *(unsigned int*)CORE0_TIMER_IRQ_CTRL = 2;
-
-  unsigned long spsr_el1 = 0x3c0;
-	asm volatile ("msr spsr_el1, %0" ::"r"(spsr_el1));
-
-	unsigned long jump_addr = (uintptr_t)func;
-	asm volatile("msr elr_el1,%0" ::"r"(jump_addr));
-	unsigned long sp = (unsigned long) sp_addr;
-	asm volatile("msr sp_el0,%0" :: "r"(sp));
-  // asm volatile("mov x0, #0");          // `0b0000` -> M=0（EL0），DAIF=0（允許 IRQ）
-  // asm volatile("msr SPSR_EL1, x0");
-  // spsr_el1 = 0x0; // M = 0 (EL0), DAIF = 0b0000 (允許 IRQ/FIQ)
-  // asm volatile("msr SPSR_EL1, %0" :: "r"(spsr_el1));
-  // *(unsigned int*)CORE0_TIMER_IRQ_CTRL = 2;
-	asm volatile("eret");
-
-  uart_puts("After eret (should never reach here)!\n");
+  uart_puts("Starting user process pid ");
+  uart_putint((unsigned long long)process->pid);
+  uart_puts("...\n");
+  return process;
 }
-
-
-void* load_user_program(const char* filename) {
-    struct cpio_file file = parse_or_find_file_in_archive(filename, 1);
-    if (file.size == 0) {
-        uart_puts("Error: File not found in initramfs.\n");
-        return 0;
-    }
-    // char* user_program_addr = simple_malloc(64);
-    char* user_program_addr = kmalloc(64);
-    
-    // 分配記憶體來放 user program
-    void* user_space = (void*) user_program_addr;
-    memcpy_(user_space, file.data, file.size);
-
-    uart_puts("User program loaded to RAM at ");
-    uart_put_hex((uintptr_t)user_space);
-    uart_puts("\n");
-
-    return user_space;
-}
-
 
 void execute_user_program(char *filename) {
-  void *prog_start = load_user_program(filename);
-  if (prog_start == 0) {
-      uart_puts("Error: Failed to load program.\n");
-      return;
-  }
-  // void* ptr = simple_malloc(4096);
-  void* ptr = kmalloc(4096);
-  uart_puts("SP_EL0 = ");
-  uart_put_hex((uintptr_t)ptr);
-  uart_puts("\n");
-  uart_puts("Switching to user mode...\n");
-  switch_to_user_mode(prog_start, ptr+4096);
+  if (!start_user_process(filename))
+    return;
+
+  // This is called by the kernel shell.  Transfer control to the scheduler;
+  // the current shell task will not return until the user process exits.
+  idle_task();
 }
-
-// void cpio_exec_program(char* filename) {
-// 	int targetfile_num = findfile(filename);
-
-// 	char* target = (char*) 0x20000;
-// 	for(unsigned i = 0; i<f[targetfile_num].file_size; i++){
-// 		*target++ = f[targetfile_num].file_content_head[i];
-// 	}
-
-// 	unsigned long spsr_el1 = 0x3c0;
-// 	asm volatile ("msr spsr_el1, %0" ::"r"(spsr_el1));
-// 	unsigned long jump_addr = 0x20000;
-// 	asm volatile("msr elr_el1,%0" ::"r"(jump_addr));
-// 	unsigned long sp = (unsigned long) simple_malloc(4096);
-// 	asm volatile("msr sp_el0,%0" :: "r"(sp));
-// 	asm volatile("eret");
-// }

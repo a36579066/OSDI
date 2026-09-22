@@ -3,17 +3,22 @@
 #include "type.h"
 
 
-#define PAGE_SIZE        (uint64_t)4096             // 一頁大小（4KB）
-#define MAX_ORDER        19               // 最大階層 (0x3c000000/0x1000 = 0x3c000 = 245760 = 2^17 + 2^16 + 2^15 + 2^14) => 19
-#define BUDDY_START      0x0       // buddy 系統管理的起始實體記憶體位址
-#define BUDDY_END        0x3c000000       // buddy 系統管理的結束實體記憶體位址
-#define BUDDY_METADATA_ADDR  0x10000000   // metadata 存放處（不要放在可分配區）
-#define MAX_ALLOC (1 << MAX_ORDER) - 1
+#define PAGE_SIZE        ((uintptr_t)4096)       // 一頁大小（4KB）
+#define MAX_ORDER        19                      // root order = MAX_ORDER - 1
+#define BUDDY_START      ((uintptr_t)0x00000000)
+#define BUDDY_END        ((uintptr_t)0x3c000000) // Lab 4 的 usable memory end
+#define BUDDY_METADATA_ADDR ((uintptr_t)0x10000000)
+
+// The buddy tree is a complete binary tree.  Since BUDDY_END is not a
+// power-of-two boundary, the tree covers one extra tail which is reserved
+// during initialization.
+#define BUDDY_ROOT_SIZE  (PAGE_SIZE << (MAX_ORDER - 1))
+#define BUDDY_ROOT_END   (BUDDY_START + BUDDY_ROOT_SIZE)
+#define BUDDY_PAGE_COUNT (1U << (MAX_ORDER - 1))
+#define MAX_ALLOC        ((1U << MAX_ORDER) - 1U)
 #define MAX_PAGE_NUM_FOR_CHUNK 3
 #define NUM_POOLS        6
 
-
-#define NUM_POOLS 6
 static const size_t pool_sizes[NUM_POOLS] = {16, 32, 48, 96, 128, 2048};
 
 
@@ -21,6 +26,11 @@ static const size_t pool_sizes[NUM_POOLS] = {16, 32, 48, 96, 128, 2048};
 
 extern int DEBUG;
 extern int DEMO;
+
+#ifndef ALLOC_DEMO
+#define ALLOC_DEMO 0
+#endif
+
 typedef struct chunk {
     struct chunk* next;
 } chunk_t;
@@ -63,7 +73,7 @@ typedef struct buddy_block_list {
 
 
 typedef struct {
-  uintptr_t* addr;
+  void* addr;
   buddy_block* block;
   int valid; 
 } allocation_entry;

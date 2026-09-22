@@ -27,6 +27,7 @@ struct fdt_header {
     uint32_t size_dt_struct;
 };
 
+uint32_t be32_to_cpu(const void *addr);
 void initramfs_callback(const char *prop_name, const void *prop_data, uint32_t prop_len);
 typedef void (*fdt_callback)(const char* name,const void *data,uint32_t size);
 void fdt_traverse(fdt_callback cb);
@@ -34,4 +35,3 @@ void fdt_traverse(fdt_callback cb);
 
 
 #endif
-

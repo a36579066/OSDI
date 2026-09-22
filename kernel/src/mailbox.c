@@ -28,15 +28,18 @@ unsigned int mailbox_read(unsigned int channel) {
 
 
 int mailbox_call(unsigned char channel, volatile unsigned int *mailbox_buffer, unsigned int size) {
-    if (!mailbox_buffer || size < 2) return 0;  // 確保 buffer 有效，且至少有 Header (大小 + Request)
+    if (!mailbox_buffer || size < 2) return 0;  // header + request code
 
     uintptr_t buffer_address = (uintptr_t)mailbox_buffer;
+    if (buffer_address & 0xF)
+        return 0;  // mailbox property buffers must be 16-byte aligned
     unsigned int r = ((unsigned int)(buffer_address & ~0xF)) | (channel & 0xF);
 
     mailbox_write(channel, r);
     mailbox_read(channel);
 
-    return (mailbox_buffer[1] & 0x80000000) == 0;  // 檢查回應是否成功
+    // Property-channel success is 0x80000000; 0x80000001 is failure.
+    return mailbox_buffer[1] == 0x80000000U;
 }
 
 
@@ -98,4 +101,3 @@ void get_arm_memory(unsigned int *base, unsigned int *size) {
 
 //     mailbox_call(8, mailbox, 8);  // Channel 8 (Tags)
 // }
-

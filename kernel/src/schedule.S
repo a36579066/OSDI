@@ -67,15 +67,16 @@ get_current:
     ldp x24, x25, [sp ,16 * 12]
     ldp x26, x27, [sp ,16 * 13]
     ldp x28, x29, [sp ,16 * 14]
-    ldp x30, x0, [sp, 16 * 15]
+    ldr x30, [sp, 16 * 15]
+    ldr x0, [sp, 248]
     msr spsr_el1, x0
-    // load information when interrupted task return(used when nested interrupt occurs)
-    ldp x0, x1, [sp, 16 * 16]
+    ldr x0, [sp, 256]
     msr elr_el1, x0
-    msr sp_el0, x1
-    // restore x0 and x1(as we just use it to restore the information of spsr and elr)
+    ldr x0, [sp, 264]
+    msr sp_el0, x0
+    // restore x0 and x1 (as we used them for exception state)
     ldp x0, x1, [sp ,16 * 0]
-    add sp, sp, 16 * 17
+    add sp, sp, 32 * 9
 .endm
 
 .global ret_from_fork
@@ -123,4 +124,6 @@ eret_to_user:
     ldr     x1,       [sp, #264]
     msr     SP_EL0,   x1
 
+    // The frame occupies one complete exception frame.
+    add     sp, sp, #288
     eret

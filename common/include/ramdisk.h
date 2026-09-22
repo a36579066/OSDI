@@ -4,5 +4,6 @@
 #include <stdint.h>
 
 extern char *RAMDISK_BASE;
+extern char *RAMDISK_END;
 
 #endif

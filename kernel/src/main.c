@@ -33,11 +33,14 @@ void main() {
   task_queue_init();
   // print_pool_state();
   // print_free_list();
-  
-  enable_interrupts();  
+
   uart_enable_interrupt();
+  /* All handlers and queues are initialized before the CPU accepts IRQs. */
+  irq_enable();
   
+#if !ALLOC_DEMO
   DEMO = 0;
+#endif
   uart_puts("# ");
 
 
@@ -144,5 +147,14 @@ for (int i = 0; i < NUM_BLOCKS_AT_ORDER_3; ++i) {
 */
 
 // uart_puts("\n==========\n");
-  while(1) asm volatile("nop");
+  /*
+   * UART/timer IRQ handlers only enqueue deferred work.  Drain it from the
+   * normal EL1 event loop, where callbacks are not running on an exception
+   * frame.  Keep this loop explicit for the lab's single-core QEMU setup;
+   * the handler returns to it after every IRQ.
+   */
+  while (1) {
+    task_execute();
+    asm volatile("nop" ::: "memory");
+  }
 }

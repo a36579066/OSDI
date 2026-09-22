@@ -5,10 +5,12 @@
 #include "lock.h"
 #include "uart.h"
 #include "utils.h"
-#include "syscall.h"
+#include "exception_.h"
 // #include "mem.h"
 
 #define THREAD_STK_SIZE 4096
+#define USER_STACK_SIZE 16384
+#define THREAD_SIGNAL_COUNT 64
 
 extern int next_pid;
 
@@ -41,8 +43,12 @@ typedef struct thread {
     struct thread *prev;
     char *data;
     int data_size;
+    char *user_stack;
+    unsigned int user_stack_size;
     thread_status_t status;
     int pid;
+    int is_user;
+    uint64_t signal_handlers[THREAD_SIGNAL_COUNT];
     trap_frame_t  *trapframe; // 在 kernel stack 頂，用來儲存 EL0 的寄存器
     void          *pagetable; // for lab6 or 7? 未來 MMU 時會用到，先留 NULL
 } thread_t;
@@ -66,6 +72,10 @@ void kill_zombies(void);
 void idle_task(void);
 void foo(void);
 void init_user_prog(void);
+
+// Exception-driven scheduling for user processes.
+trap_frame_t *schedule_from_irq(trap_frame_t *tf);
+trap_frame_t *exit_current_thread(trap_frame_t *tf, int status);
 
 // user process
 thread_t *process_create(uint64_t entry_point, uint64_t user_sp);

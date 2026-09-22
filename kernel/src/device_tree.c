@@ -90,6 +90,10 @@ void fdt_traverse(fdt_callback callback) {
 
 // Callback function to find initramfs address
 void initramfs_callback(const char *prop_name, const void *prop_data, uint32_t prop_len) {
+    if (prop_data == NULL || prop_len < sizeof(uint32_t)) {
+        return;
+    }
+
     // uart_puts(prop_name);
     // uart_puts("\n");
     if (strcmp_(prop_name, "linux,initrd-start") == 0) {
@@ -102,11 +106,9 @@ void initramfs_callback(const char *prop_name, const void *prop_data, uint32_t p
     }
 
     if (strcmp_(prop_name, "linux,initrd-end") == 0) {
-        // set_ramdisk_base((uintptr_t)be32_to_cpu((char*)prop_data));
-       
+        RAMDISK_END = (char*)(uintptr_t)be32_to_cpu((char*)prop_data);
         uart_puts("Found initramfs end address: ");
-        uart_put_hex((uintptr_t) (char*)(uintptr_t)be32_to_cpu((char*)prop_data));
+        uart_put_hex((uintptr_t)RAMDISK_END);
         uart_puts("\n");
     }
 }
-

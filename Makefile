@@ -1,4 +1,4 @@
-.PHONY: all clean kernel common
+.PHONY: all clean kernel common debug demo debug-table
 
 all: common kernel
 
@@ -23,7 +23,7 @@ common/build/%.o: $(COMMON_SRC_DIR)/%.c | $(COMMON_BUILD_DIR)
 common/build:
 	mkdir -p common/build
 
-kernel:
+kernel: common
 	$(MAKE) -C kernel
 
 clean:
@@ -34,5 +34,14 @@ clean:
 # 	$(MAKE) -C bootloader run
 # 	# qemu-system-aarch64 -M raspi3b -kernel kernel/build/kernel8.img -display none -serial null -serial stdio 
 
-run:
+run: common
 	$(MAKE) -C kernel run
+
+debug: common
+	$(MAKE) -C kernel debug
+
+demo: common
+	$(MAKE) -C kernel demo
+
+debug-table: common
+	$(MAKE) -C kernel debug-table
