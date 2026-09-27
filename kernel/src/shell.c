@@ -1,4 +1,5 @@
 #include <uart.h>
+#include <shell.h>
 #include <string.h>
 #include <mailbox.h>
 #include <reboot.h>
@@ -26,6 +27,46 @@ static void async_shell_clear_buffers(void)
     uart_tx_tail = 0;
     uart_tx_head = 0;
     irq_restore(state);
+}
+
+/* One complete UART line wakes the shell.  RX remains masked until the
+ * shell consumes the shared buffer, so a second line cannot overwrite it. */
+static thread_t *kernel_shell = NULL;
+static int shell_line_ready = 0;
+
+void async_shell_notify_line_ready(void)
+{
+    irq_state_t state = irq_save();
+    shell_line_ready = 1;
+    if (kernel_shell != NULL && kernel_shell->status == THREAD_BLOCKED)
+        kernel_shell->status = THREAD_READY;
+    irq_restore(state);
+}
+
+void kernel_shell_thread(void)
+{
+    kernel_shell = cur_thread;
+
+    while (1) {
+        irq_state_t state = irq_save();
+        if (!shell_line_ready) {
+            /* IRQs are masked from the condition check through BLOCKED, so
+             * an Enter event cannot be lost between these two operations. */
+            cur_thread->status = THREAD_BLOCKED;
+            irq_restore(state);
+            schedule();
+            continue;
+        }
+        shell_line_ready = 0;
+        irq_restore(state);
+
+        async_shell();
+
+        /* A command that started a user process returns here only after the
+         * last user thread exits and idle_task() returns UART ownership. */
+        if (!ready_run_user)
+            uart_enable_interrupt();
+    }
 }
 
 void shell() {
@@ -298,10 +339,7 @@ void async_shell() {
         // start scheduling
         // asm volatile("msr tpidr_el1, %0" ::"r" (kmalloc(sizeof(thread_t))));
         
-        idle_task();
-        
-        // schedule();
-        // schedule();
+        schedule();
         DEMO = 0;
         
     }
@@ -331,12 +369,9 @@ void async_shell() {
             return;
         }
 
-        // 3. 一進 scheduler 就會選到 user process
-        // schedule();
-        idle_task();
-        
-        // 不會回到這裡
-        while (1) { /* unreachable */ }
+        /* Save the shell thread's context.  When the final user process
+         * exits, idle_task() schedules this thread again at this point. */
+        schedule();
     }
     else {
         uart_puts("Unknown command: ");

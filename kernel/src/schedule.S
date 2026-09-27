@@ -45,6 +45,16 @@ load_context:
     mov sp,  x9
     ret
 
+// A user syscall/exception cannot directly return to an arbitrary kernel
+// thread with eret: kernel threads are resumed from thread_context_t, not a
+// trap frame.  thread.c first selects that thread and stores it in TPIDR_EL1.
+// The exception epilogue erets here in EL1h; then load_context installs the
+// target thread's saved stack/register context and returns to its continuation.
+.global exception_to_kernel
+exception_to_kernel:
+    mrs x0, tpidr_el1
+    b load_context
+
 .global get_current
 get_current:
     mrs x0, tpidr_el1

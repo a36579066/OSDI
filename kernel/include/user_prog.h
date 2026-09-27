@@ -6,6 +6,7 @@
 void execute_user_program(char *filename);
 void *load_user_program(const char *filename);
 thread_t *start_user_process(const char *filename);
+void leave_user_mode(void);
 
 
 extern int ready_run_user;

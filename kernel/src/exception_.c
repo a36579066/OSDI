@@ -59,7 +59,7 @@ trap_frame_t *c_system_call_handler(trap_frame_t *tf) {
       tf->x0 = (uint64_t)sys_fork(tf);
       break;
     case 5:
-      return exit_current_thread(tf, (int)tf->x0);
+      return exit_user_session(tf, (int)tf->x0);
     case 6:
       tf->x0 = (uint64_t)sys_mbox_call((unsigned char)tf->x0,
                                        (unsigned int *)tf->x1);
@@ -141,6 +141,16 @@ static void uart_rearm_deferred_sources(void)
   if (uart_tx_head != uart_tx_tail)
     enable_mask |= 2U;            /* TX */
   *(volatile unsigned int *)AUX_MU_IER_REG |= enable_mask;
+  irq_restore(state);
+}
+
+/* A completed command must keep RX masked until kernel_shell_thread() has
+ * copied uart_rx_buffer.  TX may still be armed to flush the echoed line. */
+static void uart_rearm_tx_only(void)
+{
+  irq_state_t state = irq_save();
+  if (uart_tx_head != uart_tx_tail)
+    *(volatile unsigned int *)AUX_MU_IER_REG |= 2U;
   irq_restore(state);
 }
 
@@ -237,7 +247,8 @@ void uart_rx_handler()
      * A single host write can put several bytes in the Mini UART FIFO.  Drain
      * the FIFO in one deferred callback; otherwise re-enabling RX after only
      * one byte lets a level-triggered IRQ starve the normal event loop.
-     * Stop at the first newline so async_shell() consumes exactly one line.
+     * Stop at the first newline so kernel_shell_thread() consumes exactly
+     * one line after it is woken.
      */
     while (!line_ready &&
            (*(volatile unsigned int *)AUX_MU_LSR_REG & 0x01U)) {
@@ -271,8 +282,9 @@ void uart_rx_handler()
     irq_restore(state);
 
     if (line_ready) {
-        delay(150);
-        async_shell();
+        async_shell_notify_line_ready();
+        uart_rearm_tx_only();
+        return;
     }
 
     uart_rearm_deferred_sources();

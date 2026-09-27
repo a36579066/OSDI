@@ -8,6 +8,14 @@
 
 int ready_run_user = 0;
 
+void leave_user_mode(void) {
+  if (!ready_run_user)
+    return;
+
+  ready_run_user = 0;
+  uart_enable_interrupt();
+}
+
 /*
  * Lab 5's user program reads CNTPCT_EL0/CNTFRQ_EL0 for its delay loop.
  * EL0 access to the physical counter is controlled by CNTKCTL_EL1[0]
@@ -105,7 +113,7 @@ void execute_user_program(char *filename) {
   if (!start_user_process(filename))
     return;
 
-  // This is called by the kernel shell.  Transfer control to the scheduler;
-  // the current shell task will not return until the user process exits.
-  idle_task();
+  /* The caller is the kernel shell thread.  Save its context and let the
+   * scheduler enter the new user process; do not recursively enter idle. */
+  schedule();
 }

@@ -7,4 +7,6 @@
 
 void shell();
 void async_shell();
+void async_shell_notify_line_ready(void);
+void kernel_shell_thread(void);
 #endif

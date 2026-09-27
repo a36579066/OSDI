@@ -10,6 +10,7 @@
 #define REQUEST_FAILED      0x80000001
 #define TAG_REQUEST_CODE    0x00000000
 #define END_TAG             0x00000000
+#define MAILBOX_TIMEOUT     10000000U
 
 
 void mailbox_write(unsigned int channel, unsigned int data) {
@@ -35,11 +36,33 @@ int mailbox_call(unsigned char channel, volatile unsigned int *mailbox_buffer, u
         return 0;  // mailbox property buffers must be 16-byte aligned
     unsigned int r = ((unsigned int)(buffer_address & ~0xF)) | (channel & 0xF);
 
-    mailbox_write(channel, r);
-    mailbox_read(channel);
+    /* A mailbox request runs from an SVC handler, where IRQs are masked.
+     * Waiting forever here would therefore freeze both timer scheduling and
+     * UART input if QEMU/the GPU does not answer this request. */
+    unsigned int timeout = MAILBOX_TIMEOUT;
+    while ((MAILBOX_STATUS & MAILBOX_FULL) && timeout--)
+        asm volatile("nop");
+    if (MAILBOX_STATUS & MAILBOX_FULL)
+        return 0;
 
-    // Property-channel success is 0x80000000; 0x80000001 is failure.
-    return mailbox_buffer[1] == 0x80000000U;
+    asm volatile("dmb ish" ::: "memory");
+    MAILBOX_WRITE = r;
+
+    timeout = MAILBOX_TIMEOUT;
+    while (timeout--) {
+        if (MAILBOX_STATUS & MAILBOX_EMPTY) {
+            asm volatile("nop");
+            continue;
+        }
+
+        unsigned int response = MAILBOX_READ;
+        if ((response & 0xF) == (channel & 0xF)) {
+            asm volatile("dmb ish" ::: "memory");
+            return mailbox_buffer[1] == REQUEST_SUCCEED;
+        }
+    }
+
+    return 0;
 }
 
 

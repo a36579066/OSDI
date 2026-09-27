@@ -10,6 +10,7 @@
 #include <interrupt.h>
 #include <exception_.h>
 #include <task_queue.h>
+#include <thread.h>
 
 extern void* core_timer_enable;
 void check_current_el(void) {
@@ -147,14 +148,14 @@ for (int i = 0; i < NUM_BLOCKS_AT_ORDER_3; ++i) {
 */
 
 // uart_puts("\n==========\n");
-  /*
-   * UART/timer IRQ handlers only enqueue deferred work.  Drain it from the
-   * normal EL1 event loop, where callbacks are not running on an exception
-   * frame.  Keep this loop explicit for the lab's single-core QEMU setup;
-   * the handler returns to it after every IRQ.
-   */
-  while (1) {
-    task_execute();
-    asm volatile("nop" ::: "memory");
+  thread_init();
+  if (!thread_create(kernel_shell_thread, NULL)) {
+    uart_puts("Unable to create kernel shell thread\n");
+    while (1)
+      asm volatile("wfi" ::: "memory");
   }
+
+  /* idle_task() is the one kernel event loop after boot: it schedules
+   * threads, drains deferred IRQ work, and sleeps with wfi when idle. */
+  idle_task();
 }
