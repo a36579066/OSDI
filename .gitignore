@@ -6,10 +6,9 @@
 /user/*.bin
 /datasheet/
 
-# Generated initramfs payloads; syscall.img is the prebuilt runtime image.
+# Generated initramfs payloads, including the local-only syscall image.
 /rootfs/*.bin
 /rootfs/*.img
-!/rootfs/syscall.img
 
 # Packaged images and local archives
 /initramfs*.cpio

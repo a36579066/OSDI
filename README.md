@@ -52,7 +52,6 @@ Available shell commands include:
 
 ```text
 thread
-process syscall.img
 process vm_adv_test.img
 process mmap_test.img
 process vm_fault_test.img
@@ -60,7 +59,7 @@ process vm_unmapped_test.img
 process signal_test.img
 ```
 
-Running `process` without a filename starts `syscall.img`. The test images are generated from assembly sources in `user/` whenever `make run` is invoked.
+The test images are generated from assembly sources in `user/` whenever `make run` is invoked. Running `process` without a filename looks for the optional local `syscall.img`; that prebuilt payload is intentionally excluded from this repository.
 
 ## Memory tests
 
@@ -72,7 +71,7 @@ Running `process` without a filename starts `syscall.img`. The test images are g
 | `vm_unmapped_test.img` | An access outside registered user regions is rejected. |
 | `signal_test.img` | Signal handler entry and return to the interrupted user context. |
 
-The default `syscall.img` is a prebuilt user payload included in `rootfs/`.
+The prebuilt `rootfs/syscall.img` payload is kept local and is not distributed with this repository. The test images listed above are built from the included user-program sources.
 
 ## Source layout
 
@@ -83,7 +82,7 @@ The default `syscall.img` is a prebuilt user payload included in `rootfs/`.
 | `kernel/include/` | Kernel interfaces and data structures. |
 | `common/src/`, `common/include/` | UART, CPIO, locking, and shared runtime utilities. |
 | `user/` | User-program assembly sources and build rules. |
-| `rootfs/` | Static runtime files and the prebuilt default user image. |
+| `rootfs/` | Runtime files and locally generated user-program images. |
 | `datasheet/` | BCM2835/2836/2837 hardware reference documents. |
 
 ## Scope
