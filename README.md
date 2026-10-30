@@ -86,6 +86,10 @@ The prebuilt `rootfs/syscall.img` payload is kept local and is not distributed w
 | `THIRD_PARTY_NOTICES.md` | Attribution and license information for the included Raspberry Pi DTB. |
 | `datasheet/` | BCM2835/2836/2837 hardware reference documents. |
 
+## License
+
+Original source code and project documentation are licensed under the MIT License. Third-party materials listed in `THIRD_PARTY_NOTICES.md` remain under their respective licenses.
+
 ## Scope
 
 This is a small kernel implementation focused on core operating-system mechanisms. Anonymous private mappings, basic process operations, and the listed system calls are supported; it does not aim to provide a complete POSIX environment or a general-purpose filesystem.
