@@ -69,6 +69,7 @@ typedef struct buddy_block_list {
   unsigned int size;
   int node_id;               /* Complete-binary-tree index. */
   int on_free_list;          /* 1 only while linked in free_lists[order]. */
+  unsigned int refcount;     /* Used for shared 4 KB user frames. */
 } buddy_block;
 
 /* One entry exists for every possible node in the complete buddy tree. */
@@ -124,6 +125,7 @@ int find_pool_index(size_t size);
 void* allocate_new_chunk_page(memory_pool_t *pool);
 void* kmalloc(size_t size);
 void kfree(void *ptr);
+int buddy_page_get(void *page);
 
 void print_free_list();
 void print_alloc();

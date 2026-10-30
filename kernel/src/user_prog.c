@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <utils.h>
 #include <exception_.h>
+#include <vm.h>
+#include <syscall.h>
 
 int ready_run_user = 0;
 
@@ -62,35 +64,51 @@ thread_t *start_user_process(const char *filename) {
     return NULL;
   }
 
-  // The program is a flat, position-independent image.  Keep it in a
-  // separate allocation for the lifetime of the process.
-  char *program = (char *)kmalloc((size_t)file.size);
-  char *user_stack = (char *)kmalloc(USER_STACK_SIZE);
-  if (!program || !user_stack) {
-    if (program)
-      kfree(program);
-    if (user_stack)
-      kfree(user_stack);
-    uart_puts("Error: Cannot allocate user process memory.\n");
+  if ((uint64_t)file.size > VM_USER_CODE_LIMIT) {
+    uart_puts("Error: User image is larger than the 2 MB code window.\n");
     return NULL;
   }
-  memcpy_(program, file.data, (size_t)file.size);
 
-  uintptr_t user_stack_top = ((uintptr_t)user_stack + USER_STACK_SIZE) &
-                             ~(uintptr_t)0xF;
-  thread_t *process = process_create((uint64_t)(uintptr_t)program,
-                                     (uint64_t)user_stack_top);
+  uint64_t image_size =
+      ((uint64_t)file.size + VM_PAGE_SIZE - 1) & ~(VM_PAGE_SIZE - 1);
+  void *pagetable = vm_create_user_address_space();
+  user_mmap_region_t *code_region = vm_region_create(
+      VM_USER_CODE_BASE, image_size,
+      PROT_READ | PROT_WRITE | PROT_EXEC, 0, file.data,
+      (uint64_t)file.size);
+  user_mmap_region_t *stack_region = vm_region_create(
+      VM_USER_STACK_BASE, USER_STACK_SIZE, PROT_READ | PROT_WRITE,
+      0, NULL, 0);
+  if (!pagetable || !code_region || !stack_region) {
+    vm_region_list_free(code_region);
+    vm_region_list_free(stack_region);
+    vm_destroy_address_space(pagetable);
+    uart_puts("Error: Cannot prepare user process memory.\n");
+    return NULL;
+  }
+  code_region->next = stack_region;
+
+  /* Do not let the timer schedule this READY thread before its VMAs exist. */
+  lock();
+  thread_t *process = process_create(VM_USER_CODE_BASE, VM_USER_STACK_TOP,
+                                     pagetable);
   if (!process) {
-    kfree(program);
-    kfree(user_stack);
+    unlock();
+    vm_region_list_free(code_region);
+    vm_destroy_address_space(pagetable);
     uart_puts("Error: Cannot create user process.\n");
     return NULL;
   }
 
-  process->data = program;
-  process->data_size = file.size;
-  process->user_stack = user_stack;
+  /* Register code and stack as VMAs; their physical frames are allocated by
+   * the first instruction fetch or stack access. */
+  process->status = THREAD_BLOCKED;
+  process->mmap_regions = code_region;
+  process->mmap_next_addr = VM_USER_MMAP_BASE;
   process->user_stack_size = USER_STACK_SIZE;
+  process->is_user = 1;
+  process->status = THREAD_READY;
+  unlock();
 
   // The user program uses polling syscalls for UART input.  Leaving the
   // kernel shell's RX/TX IRQs enabled would enqueue shell tasks forever
@@ -106,6 +124,7 @@ thread_t *start_user_process(const char *filename) {
   uart_puts("Starting user process pid ");
   uart_putint((unsigned long long)process->pid);
   uart_puts("...\n");
+
   return process;
 }
 

@@ -1,6 +1,9 @@
 #include "thread.h"
 #include "task_queue.h"
 #include "user_prog.h"
+#include "mmu.h"
+#include "vm.h"
+#include "syscall.h"
 
 thread_t *cur_thread = NULL;
 thread_t *run_queue = NULL;
@@ -60,7 +63,6 @@ thread_t *thread_create(void *fn, void *arg) {
   t->status = THREAD_READY;
   t->trapframe = NULL;
   t->pagetable = NULL;
-  t->user_stack = NULL;
   t->user_stack_size = 0;
   t->is_user = 0;
   t->active_signal = THREAD_NO_ACTIVE_SIGNAL;
@@ -111,6 +113,11 @@ void schedule(void) {
   asm volatile("msr tpidr_el1, %0" :: "r"(cur_thread));
   unlock();
 
+  if (next->is_user)
+    mmu_switch_ttbr0((uint64_t)(uintptr_t)next->pagetable);
+  else
+    mmu_switch_to_kernel_address_space();
+
   switch_to(&prev->context, &next->context);
 }
 
@@ -136,10 +143,12 @@ void kill_zombies(void) {
           run_queue = t->next;
       }
 
-      if (t->user_stack)
-        kfree(t->user_stack);
-      if (t->signal_stack)
-        kfree(t->signal_stack);
+      if (t->is_user) {
+        sys_mmap_release(t);
+        vm_destroy_address_space(t->pagetable);
+      } else if (t->mmap_regions) {
+        sys_mmap_release(t);
+      }
       if (t->sp)
         kfree(t->sp);
       kfree(t);
@@ -243,7 +252,10 @@ void init_user_prog(void) {
 //------------------------------------------------------------------------------
 // process_create: 建 user-process，設定 trapframe + eret entry
 //------------------------------------------------------------------------------
-thread_t *process_create(uint64_t entry_point, uint64_t user_sp) {
+thread_t *process_create(uint64_t entry_point, uint64_t user_sp,
+                         void *pagetable) {
+  if (!pagetable)
+    return NULL;
   thread_t *t = thread_create(NULL, NULL);
   if (!t)
     return NULL;
@@ -255,6 +267,7 @@ thread_t *process_create(uint64_t entry_point, uint64_t user_sp) {
   t->trapframe->sp_el0 = user_sp;
   t->trapframe->spsr_el1 = 0;       // EL0t, IRQ/FIQ enabled
   t->is_user = 1;
+  t->pagetable = pagetable;
 
   // switch_to() loads this context and returns into eret_to_user(), which
   // restores the complete frame and enters EL0.
@@ -325,6 +338,7 @@ trap_frame_t *schedule_from_irq(trap_frame_t *tf) {
   cur_thread = next;
   cur_thread->status = THREAD_RUNNING;
   asm volatile("msr tpidr_el1, %0" :: "r"(cur_thread));
+  mmu_switch_ttbr0((uint64_t)(uintptr_t)cur_thread->pagetable);
   return cur_thread->trapframe;
 }
 
@@ -340,6 +354,7 @@ trap_frame_t *exit_current_thread(trap_frame_t *tf, int status) {
     cur_thread = next;
     cur_thread->status = THREAD_RUNNING;
     asm volatile("msr tpidr_el1, %0" :: "r"(cur_thread));
+    mmu_switch_ttbr0((uint64_t)(uintptr_t)cur_thread->pagetable);
     return cur_thread->trapframe;
   }
 

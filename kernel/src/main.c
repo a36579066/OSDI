@@ -11,6 +11,7 @@
 #include <exception_.h>
 #include <task_queue.h>
 #include <thread.h>
+#include <mmu.h>
 
 extern void* core_timer_enable;
 void check_current_el(void) {
@@ -23,6 +24,7 @@ void check_current_el(void) {
 
 void main() {
   uart_init();
+  mmu_init_kernel_mapping();
   check_current_el();
   // asm volatile("bl core_timer_enable");
   fdt_traverse(initramfs_callback);
@@ -42,7 +44,7 @@ void main() {
 #if !ALLOC_DEMO
   DEMO = 0;
 #endif
-  uart_puts("# ");
+  uart_puts("\n# ");
 
 
   

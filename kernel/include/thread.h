@@ -16,6 +16,17 @@
 
 extern int next_pid;
 
+typedef struct user_mmap_region {
+    uint64_t start;
+    uint64_t length;
+    uint64_t page_count;
+    unsigned int prot;
+    unsigned int flags;
+    const uint8_t *backing;
+    uint64_t backing_size;
+    struct user_mmap_region *next;
+} user_mmap_region_t;
+
 typedef struct thread_context {
     unsigned long long x19;
     unsigned long long x20;
@@ -44,9 +55,6 @@ typedef struct thread {
     char *sp;
     struct thread *next;
     struct thread *prev;
-    char *data;
-    int data_size;
-    char *user_stack;
     unsigned int user_stack_size;
     thread_status_t status;
     int pid;
@@ -60,12 +68,13 @@ typedef struct thread {
     int signal_active;              // A user signal handler is currently running.
     int active_signal;              // Signal number for the active handler, or none.
     trap_frame_t saved_signal_tf;   // User context to restore on sigreturn().
-    void *signal_stack;             // Temporary EL0 stack used by the handler.
 
     /* Only user threads need a trap frame: it is the EL0 state restored by
      * eret.  Kernel threads resume from context instead. */
     trap_frame_t  *trapframe;
-    void          *pagetable; // for lab6 or 7? 未來 MMU 時會用到，先留 NULL
+    void          *pagetable; // Physical address of this thread's TTBR0 root.
+    user_mmap_region_t *mmap_regions;
+    uint64_t mmap_next_addr;
 } thread_t;
 
 extern thread_t *cur_thread;
@@ -97,6 +106,7 @@ trap_frame_t *exit_current_thread(trap_frame_t *tf, int status);
 trap_frame_t *exit_user_session(trap_frame_t *tf, int status);
 
 // user process
-thread_t *process_create(uint64_t entry_point, uint64_t user_sp);
+thread_t *process_create(uint64_t entry_point, uint64_t user_sp,
+                         void *pagetable);
 
 #endif // THREAD_H

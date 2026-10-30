@@ -1,40 +1,30 @@
-.PHONY: all clean kernel common debug demo debug-table
+.PHONY: all common kernel run clean debug demo debug-table
 
-all: common kernel
-
-
-# Directories
-COMMON_DIR_NAME = common
-COMMON_SRC_DIR = $(COMMON_DIR_NAME)/src
-COMMON_INCLUDE_DIR = $(COMMON_DIR_NAME)/include
-COMMON_BUILD_DIR = $(COMMON_DIR_NAME)/build
-
+COMMON_DIR := common
+COMMON_SRC_DIR := $(COMMON_DIR)/src
+COMMON_INCLUDE_DIR := $(COMMON_DIR)/include
+COMMON_BUILD_DIR := $(COMMON_DIR)/build
 
 COMMON_SRCS := $(wildcard $(COMMON_SRC_DIR)/*.c)
-COMMON_OBJS := $(patsubst $(COMMON_SRC_DIR)/%.c, $(COMMON_BUILD_DIR)/%.o, $(COMMON_SRCS))
+COMMON_OBJS := $(patsubst $(COMMON_SRC_DIR)/%.c,$(COMMON_BUILD_DIR)/%.o,$(COMMON_SRCS))
 
 all: common kernel
 
 common: $(COMMON_OBJS)
 
-common/build/%.o: $(COMMON_SRC_DIR)/%.c | $(COMMON_BUILD_DIR)
+$(COMMON_BUILD_DIR)/%.o: $(COMMON_SRC_DIR)/%.c | $(COMMON_BUILD_DIR)
 	aarch64-linux-gnu-gcc -Wall -nostdlib -ffreestanding -I$(COMMON_INCLUDE_DIR) -c $< -o $@
 
-common/build:
-	mkdir -p common/build
+$(COMMON_BUILD_DIR):
+	mkdir -p $@
 
 kernel: common
 	$(MAKE) -C kernel
 
-clean:
-	rm -rf common/build/*.o
-	$(MAKE) -C kernel clean
-
-# run:
-# 	$(MAKE) -C bootloader run
-# 	# qemu-system-aarch64 -M raspi3b -kernel kernel/build/kernel8.img -display none -serial null -serial stdio 
-
+# Build user payloads and the initramfs before starting the standard QEMU flow.
 run: common
+	$(MAKE) -C user rootfs-programs
+	$(MAKE) -C user cpio
 	$(MAKE) -C kernel run
 
 debug: common
@@ -45,3 +35,9 @@ demo: common
 
 debug-table: common
 	$(MAKE) -C kernel debug-table
+
+clean:
+	rm -rf $(COMMON_BUILD_DIR)
+	$(MAKE) -C kernel clean
+	$(MAKE) -C user clean
+	rm -f initramfs.cpio

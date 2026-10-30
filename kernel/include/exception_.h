@@ -2,9 +2,9 @@
 # define EXCEPTION_H
 #include <interrupt.h>
 
-#define CORE0_TIMER_IRQ_CTRL 0x40000040
+#define CORE0_TIMER_IRQ_CTRL PHYS_TO_KVA(0x40000040UL)
 #define IRQ_PENDING_1		(PERIPHERAL_BASE + 0x0000B204)
-#define CORE0_INTERRUPT_SOURCE	0x40000060
+#define CORE0_INTERRUPT_SOURCE	PHYS_TO_KVA(0x40000060UL)
 
 
 #define CNTPSIRQ_BIT_POSITION 0x02
@@ -59,6 +59,7 @@ trap_frame_t *irq_handler_function(trap_frame_t *tf);
 
 // system call
 trap_frame_t *c_system_call_handler(trap_frame_t *tf);
+trap_frame_t *lower_el_sync_handler(trap_frame_t *tf);
 
 // timer
 void core_timer_handler_function();

@@ -1,5 +1,6 @@
 #include "mailbox.h"
 #include "reboot.h"
+#include "allocator.h"
 #include <stdint.h>
 
 
@@ -31,10 +32,13 @@ unsigned int mailbox_read(unsigned int channel) {
 int mailbox_call(unsigned char channel, volatile unsigned int *mailbox_buffer, unsigned int size) {
     if (!mailbox_buffer || size < 2) return 0;  // header + request code
 
-    uintptr_t buffer_address = (uintptr_t)mailbox_buffer;
-    if (buffer_address & 0xF)
+    uintptr_t buffer_kva = (uintptr_t)mailbox_buffer;
+    if (buffer_kva & 0xF)
         return 0;  // mailbox property buffers must be 16-byte aligned
-    unsigned int r = ((unsigned int)(buffer_address & ~0xF)) | (channel & 0xF);
+    uintptr_t buffer_pa = buffer_kva < BUDDY_ROOT_END
+        ? buffer_kva
+        : KVA_TO_PHYS(buffer_kva);
+    unsigned int r = ((unsigned int)(buffer_pa & ~0xFUL)) | (channel & 0xF);
 
     /* A mailbox request runs from an SVC handler, where IRQs are masked.
      * Waiting forever here would therefore freeze both timer scheduling and

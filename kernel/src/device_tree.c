@@ -4,6 +4,7 @@
 #include <uart.h>
 #include <utils.h>
 #include <ramdisk.h>
+#include <memory.h>
 
 
 
@@ -20,7 +21,8 @@ uint32_t be32_to_cpu(const void *addr) {
 
 void fdt_traverse(fdt_callback callback) {
 
-  struct fdt_header *hdr = (struct fdt_header *)dtb_addr;
+  uintptr_t dtb_kva = PHYS_TO_KVA(dtb_addr);
+  struct fdt_header *hdr = (struct fdt_header *)dtb_kva;
   uart_puts("\ndtb address: ");
   uart_put_hex((uintptr_t)dtb_addr);
   uart_puts("\n");
@@ -33,8 +35,8 @@ void fdt_traverse(fdt_callback callback) {
   uint32_t struct_offset = be32_to_cpu(&(hdr->off_dt_struct));
   uint32_t strings_offset = be32_to_cpu(&hdr->off_dt_strings);
   uint32_t struct_size = be32_to_cpu(&hdr->size_dt_struct);
-  uintptr_t struct_ptr = (uintptr_t)dtb_addr + struct_offset;
-  uintptr_t strings_ptr = (uintptr_t)dtb_addr + strings_offset;
+  uintptr_t struct_ptr = dtb_kva + struct_offset;
+  uintptr_t strings_ptr = dtb_kva + strings_offset;
 
   uintptr_t ptr = (uintptr_t)struct_ptr;
   uintptr_t end = (uintptr_t)struct_ptr + struct_size;
@@ -99,14 +101,14 @@ void initramfs_callback(const char *prop_name, const void *prop_data, uint32_t p
     if (strcmp_(prop_name, "linux,initrd-start") == 0) {
         // set_ramdisk_base((uintptr_t)be32_to_cpu((char*)prop_data));
 
-        RAMDISK_BASE = (char*)(uintptr_t)be32_to_cpu((char*)prop_data);
+        RAMDISK_BASE = (char *)PHYS_TO_KVA(be32_to_cpu((char*)prop_data));
         uart_puts("Found initramfs start address: ");
         uart_put_hex((uintptr_t)RAMDISK_BASE);
         uart_puts("\n");
     }
 
     if (strcmp_(prop_name, "linux,initrd-end") == 0) {
-        RAMDISK_END = (char*)(uintptr_t)be32_to_cpu((char*)prop_data);
+        RAMDISK_END = (char *)PHYS_TO_KVA(be32_to_cpu((char*)prop_data));
         uart_puts("Found initramfs end address: ");
         uart_put_hex((uintptr_t)RAMDISK_END);
         uart_puts("\n");

@@ -1,0 +1,19 @@
+# Compiler and linker output
+/common/build/
+/kernel/build/
+/user/*.o
+/user/*.elf
+/user/*.bin
+/datasheet/
+
+# Generated initramfs payloads; syscall.img is the prebuilt runtime image.
+/rootfs/*.bin
+/rootfs/*.img
+!/rootfs/syscall.img
+
+# Packaged images and local archives
+/initramfs*.cpio
+*.zip
+
+# macOS metadata
+.DS_Store

@@ -52,6 +52,7 @@ load_context:
 // target thread's saved stack/register context and returns to its continuation.
 .global exception_to_kernel
 exception_to_kernel:
+    bl mmu_switch_to_kernel_address_space
     mrs x0, tpidr_el1
     b load_context
 

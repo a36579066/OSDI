@@ -2,7 +2,10 @@
 #define GPIO_H
 
 #include <stdint.h>
-#define PERIPHERAL_BASE 0x3F000000  // Raspberry Pi 3B+
+#include <memory.h>
+
+#define PERIPHERAL_PHYS_BASE 0x3F000000UL
+#define PERIPHERAL_BASE PHYS_TO_KVA(PERIPHERAL_PHYS_BASE)
 #define GPIO_BASE       (PERIPHERAL_BASE + 0x200000)
 
 #define GPFSEL1         (PERIPHERAL_BASE + 0x00200004)

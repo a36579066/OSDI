@@ -4,6 +4,7 @@
 #include <exception_.h>
 #include <device_tree.h>
 #include <ramdisk.h>
+#include <mmu.h>
 
 #ifndef ALLOC_DEBUG
 #define ALLOC_DEBUG 0
@@ -26,6 +27,7 @@ static char* heap_ptr = &_heap_start;
 int debug = 0;
 extern char _start[];
 extern char _end[];
+extern char _kernel_start[];
 /* ==================== for buddy system global variables ==================== */
 buddy_system *buddy = 0;
 buddy_block* node_metadata_cursor = 0;
@@ -240,6 +242,7 @@ void *buddy_malloc(unsigned int size, int chunk) {
         set_node_availability(blk, BUDDY_NODE_IN_USE);
         // buddy->node_table[blk->node_id].availability = BUDDY_NODE_IN_USE;
     }
+    blk->refcount = target_order == 0 && !chunk ? 1U : 0U;
 
     
     if(DEBUG){
@@ -448,6 +451,13 @@ void buddy_free(void *addr) {
         uart_puts("[free] ERROR: Invalid block metadata\n");
         return;
     }
+
+    if (order == 0 && block->status == BUDDY_BLOCK_DIRECT &&
+        block->refcount > 1) {
+        block->refcount--;
+        return;
+    }
+    block->refcount = 0;
 
     set_node_availability(block, BUDDY_NODE_AVAILABLE);
     block->status = BUDDY_BLOCK_DIRECT;
@@ -785,6 +795,23 @@ void kfree(void *ptr) {
     return;
 }
 
+int buddy_page_get(void *page) {
+    if (!page || ((uintptr_t)page & (PAGE_SIZE - 1)))
+        return -1;
+
+    irq_state_t state = irq_save();
+    buddy_block *block = lookup_allocated_block(page);
+    if (!block || block->addr != page || block->size != PAGE_SIZE ||
+        block->status != BUDDY_BLOCK_DIRECT || block->refcount == 0 ||
+        block->refcount == 0xFFFFFFFFU) {
+        irq_restore(state);
+        return -1;
+    }
+    block->refcount++;
+    irq_restore(state);
+    return 0;
+}
+
 // =================================== startup ===================================
 void startup_allocator_init() {
     metadata_cursor = (uintptr_t)BUDDY_METADATA_ADDR;
@@ -833,6 +860,7 @@ void startup_allocator_init() {
             buddy->node_table[i].block->next = NULL;
             buddy->node_table[i].block->node_id = i;
             buddy->node_table[i].block->on_free_list = 0;
+            buddy->node_table[i].block->refcount = 0;
 
             buddy->node_table[i].availability = BUDDY_NODE_AVAILABLE;
 
@@ -869,8 +897,13 @@ void startup_allocator_init() {
     /* Every byte outside the Lab 4 usable range is unavailable. */
     memory_reserve((void*)BUDDY_END, (void*)BUDDY_ROOT_END);
     memory_reserve((void*)BUDDY_METADATA_ADDR, (void*)metadata_cursor);
-    memory_reserve((void*)0x0000, (void*)0x1000);   // Spin tables
-    memory_reserve((void*)_start,(void*) _end);     // Kernel image
+    /* Keep the entire first 2 MB out of the allocator.  User images start at
+     * VA 0, so their PTEs can replace this low region without hiding any
+     * kernel object addressed through the allocator's physical pointers. */
+    memory_reserve((void*)0x0000, (void*)0x00200000);
+    memory_reserve((void *)KVA_TO_PHYS(_kernel_start),
+                   (void *)KVA_TO_PHYS(_end)); // Kernel image
+    memory_reserve((void*)BOOT_PGD_PA, (void*)(BOOT_PUD_PA + PAGE_SIZE));
 
     uintptr_t dtb_start = dtb_addr;
     uintptr_t dtb_end = dtb_start;
@@ -888,8 +921,8 @@ void startup_allocator_init() {
         memory_reserve((void*)dtb_start, (void*)dtb_end);
     }
 
-    uintptr_t ramdisk_start = (uintptr_t)RAMDISK_BASE;
-    uintptr_t ramdisk_end = (uintptr_t)RAMDISK_END;
+    uintptr_t ramdisk_start = KVA_TO_PHYS(RAMDISK_BASE);
+    uintptr_t ramdisk_end = KVA_TO_PHYS(RAMDISK_END);
     if (ramdisk_end > ramdisk_start) {
         memory_reserve((void*)ramdisk_start, (void*)ramdisk_end);
     }
@@ -1069,6 +1102,7 @@ static void push_free_block(int order, buddy_block *blk) {
     buddy->free_lists[order] = blk;
 
     blk->status = BUDDY_BLOCK_DIRECT;
+    blk->refcount = 0;
     set_node_availability(blk, BUDDY_NODE_AVAILABLE);
     blk->on_free_list = 1;
 }

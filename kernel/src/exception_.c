@@ -10,6 +10,7 @@
 #include <user_prog.h>
 #include <allocator.h>
 #include <syscall.h>
+#include <vm.h>
 
 
 extern int ready_run_user; // define in user_prog.h. Set 1 when it ready to go to user space
@@ -73,6 +74,10 @@ trap_frame_t *c_system_call_handler(trap_frame_t *tf) {
     case 9:
       tf->x0 = (uint64_t)sys_signal_kill((int)tf->x0, (int)tf->x1);
       break;
+    case NR_MMAP:
+      tf->x0 = sys_mmap(tf->x0, tf->x1, (int)tf->x2, (int)tf->x3,
+                        (int)tf->x4, tf->x5);
+      break;
     case NR_SIGRETURN:
       return sys_sigreturn(tf);
     default:
@@ -83,6 +88,62 @@ trap_frame_t *c_system_call_handler(trap_frame_t *tf) {
   // Keep IRQs masked until load_all restores the user PSTATE from this frame.
   irq_disable();
   return tf;
+}
+
+trap_frame_t *lower_el_sync_handler(trap_frame_t *tf) {
+  if (!tf)
+    return tf;
+
+  uint64_t esr, far;
+  asm volatile("mrs %0, esr_el1\n\tmrs %1, far_el1"
+               : "=r"(esr), "=r"(far));
+  unsigned int ec = (unsigned int)((esr >> 26) & 0x3fU);
+  unsigned int fsc = (unsigned int)(esr & 0x3fU);
+
+  if (ec == 0x15U) /* SVC from AArch64 EL0. */
+    return c_system_call_handler(tf);
+
+  thread_t *thread = cur_thread;
+  if (!thread || !thread->is_user) {
+    uart_puts("[exception] lower-EL sync without a user thread\n");
+    for (;;)
+      asm volatile("wfe" ::: "memory");
+  }
+
+  int access = MMAP_ACCESS_READ;
+  if (ec == 0x20U) /* Instruction abort from a lower EL. */
+    access = MMAP_ACCESS_EXEC;
+  else if (ec == 0x24U && (esr & (1ULL << 6)))
+    access = MMAP_ACCESS_WRITE;
+
+  int handled = 0;
+  if ((ec == 0x20U || ec == 0x24U) && fsc >= 0x04U && fsc <= 0x07U) {
+    handled = sys_mmap_fault(thread, far, access) == 0;
+    if (handled) {
+      uart_puts("[demand paging] mapped VA ");
+      uart_b2x_64(far & ~(VM_PAGE_SIZE - 1));
+      uart_puts("\n");
+    }
+  } else if (ec == 0x24U && access == MMAP_ACCESS_WRITE &&
+             fsc >= 0x0CU && fsc <= 0x0FU) {
+    handled = vm_handle_cow_fault(thread->pagetable, far) == 0;
+    if (handled) {
+      uart_puts("[COW] copied VA ");
+      uart_b2x_64(far & ~(VM_PAGE_SIZE - 1));
+      uart_puts("\n");
+    }
+  }
+  if (handled)
+    return tf;
+
+  uart_puts("[segmentation fault] pid ");
+  uart_putint((unsigned long long)thread->pid);
+  uart_puts(" VA=");
+  uart_b2x_64(far);
+  uart_puts(" ESR=");
+  uart_b2x_64(esr);
+  uart_puts("; terminating process\n");
+  return exit_current_thread(tf, 139);
 }
 
 

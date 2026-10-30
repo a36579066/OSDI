@@ -2,11 +2,16 @@
 .global dtb_addr
 
 .section ".text.boot"
-#define CORE0_TIMER_IRQ_CTRL 0x40000040
+.equ KERNEL_VA_BASE, 0xffff000000000000
+#define CORE0_TIMER_IRQ_CTRL (KERNEL_VA_BASE + 0x40000040)
+#define BOOT_PGD_PA 0x1000
+#define BOOT_PUD_PA 0x2000
 
 _start:
 
     ldr x11, =dtb_addr  // get dtb_addr address
+    ldr x12, =KERNEL_VA_BASE
+    sub x11, x11, x12   // dtb_addr is linked high but not mapped yet
     str x0, [x11]
     // str x19, [x11] 如果要用bootloader.img就開這個上面註解掉
     // ldr x10, =dtb_addr      
@@ -28,14 +33,16 @@ primary_core:
     bl from_el2_to_el1
     // msr DAIFSet, #0xf // EL1 禁止 interrupt（防止 EL1 自己處理中斷）
     ldr x1, =_stack_top;      // Load the address of the stack top
+    ldr x2, =KERNEL_VA_BASE
+    sub x1, x1, x2             // use its physical address before MMU is on
     mov sp, x1               // Set the stack pointer
-    set_exception_vector_table:
-        adr x0, exception_vector_table
-        msr vbar_el1, x0
     
     // Initialize BSS section (zero out)
     ldr x2, =_bss_start      // Get the start address of BSS section
     ldr x3, =_bss_end        // Get the end address of BSS section
+    ldr x4, =KERNEL_VA_BASE
+    sub x2, x2, x4
+    sub x3, x3, x4
     bss_zero_loop:
         cmp x2, x3           // Check if reached the end of BSS section
         bge bss_done         // If done, jump out
@@ -46,9 +53,16 @@ primary_core:
 
 
 bss_done:
-    
-    // Jump to main()
-    bl main           // Call the main function in C
+
+    bl setup_boot_translation
+
+    /* Both TTBR0 and TTBR1 now describe this physical range.  Continue at
+     * the high alias of this stub, make SP high too, then enter C. */
+    adr x0, boot_high_entry
+    ldr x1, =KERNEL_VA_BASE
+    add x0, x0, x1
+    add sp, sp, x1
+    br x0
 
     // Infinite loop to prevent main() from returning
     b .
@@ -60,6 +74,57 @@ from_el2_to_el1:
     msr spsr_el2, x0
     msr elr_el2, lr
     eret // return to EL1
+
+/* Build the temporary EL1-only identity mapping used while enabling the MMU
+ * and branching from the low boot stub into the high-half kernel. */
+setup_boot_translation:
+    mov x0, #BOOT_PGD_PA
+    mov x1, #BOOT_PUD_PA
+    mov x2, #0x1000
+1:
+    stp xzr, xzr, [x0], #16 // clear PGD and PUD
+    stp xzr, xzr, [x1], #16 //
+    subs x2, x2, #16        //
+    b.ne 1b                 //
+
+    mov x0, #BOOT_PGD_PA
+    mov x1, #BOOT_PUD_PA
+    orr x2, x1, #0x3          // PGD[0] -> PUD table descriptor
+    str x2, [x0]
+
+    mov x2, #0x401            // AF | kernel-only | AttrIndx(0: Device) | block
+    str x2, [x1]              // 0x00000000 - 0x3fffffff
+    ldr x3, =0x40000000
+    orr x3, x3, x2
+    str x3, [x1, #8]          // 0x40000000 - 0x7fffffff
+
+    dsb ishst
+    ldr x2, =0x4400           // MAIR Attr0=Device, Attr1=Normal non-cacheable
+    msr mair_el1, x2
+    ldr x2, =0x80100010       // 48-bit VA, 4 KB granule for TTBR0/TTBR1
+    msr tcr_el1, x2
+    isb
+    msr ttbr0_el1, x0
+    msr ttbr1_el1, x0
+    dsb ish
+    isb
+    mrs x2, sctlr_el1
+    orr x2, x2, #1            // SCTLR_EL1.M: enable stage-1 MMU
+    msr sctlr_el1, x2         // Desciption in page 2029
+    isb
+    ret
+
+/* This label is linked at its low physical address but is entered through
+ * TTBR1 at KERNEL_VA_BASE + physical address. */
+boot_high_entry:
+    ldr x0, =exception_vector_table
+    msr vbar_el1, x0
+    isb
+    ldr x0, =main
+    br x0
+
+/* Everything below is ordinary high-half kernel text. */
+.section .text
 
 
 
@@ -128,8 +193,8 @@ exception_handler:
 
 syscall_handler:
   save_all
-  mov x0, sp              // pass the saved trap frame
-  bl c_system_call_handler
+  mov x0, sp              // pass the saved trap frame and inspect ESR_EL1
+  bl lower_el_sync_handler
   bl prepare_user_return  // may replace tf when a signal terminates a thread
   mov sp, x0              // the syscall may switch to another user thread
   load_all
