@@ -83,6 +83,7 @@ The prebuilt `rootfs/syscall.img` payload is kept local and is not distributed w
 | `common/src/`, `common/include/` | UART, CPIO, locking, and shared runtime utilities. |
 | `user/` | User-program assembly sources and build rules. |
 | `rootfs/` | Runtime files and locally generated user-program images. |
+| `THIRD_PARTY_NOTICES.md` | Attribution and license information for the included Raspberry Pi DTB. |
 | `datasheet/` | BCM2835/2836/2837 hardware reference documents. |
 
 ## Scope
